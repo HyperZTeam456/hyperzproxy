@@ -116,7 +116,7 @@ async function proxyCloudMoon(request) {
     }
   } else {
     // Direct proxy to CloudMoon
-    targetURL = 'https://crazygames.com' + url.pathname + url.search;
+    targetURL = 'https://web.cloudmoonapp.com/' + url.pathname + url.search;
   }
   
   // Block ad requests
