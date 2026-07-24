@@ -2,7 +2,7 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
-// Pre-compiled regexes for content rewriting (still needed inside iframe)
+// Pre-compiled regexes
 const RE_SCRIPT_AD = /<script[^>]*(?:googlesyndication|adsbygoogle|doubleclick|google-analytics|googletagmanager)[^>]*>[\s\S]*?<\/script>/gi;
 const RE_IFRAME_AD = /<iframe[^>]*(?:googlesyndication|doubleclick|google-analytics)[^>]*>[\s\S]*?<\/iframe>/gi;
 const RE_INS_AD = /<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi;
@@ -35,7 +35,7 @@ const AD_PATTERNS = [
   'advertis', 'banner', 'popup'
 ];
 
-// 🔒 IFRAME SHELL TEMPLATE - Served instead of raw proxied HTML
+// ✅ FIXED SHELL - No self-blocking headers, allows same-origin framing
 function getShellHTML(workerOrigin, targetURL) {
   const proxySrc = `${workerOrigin}/${targetURL.host}${targetURL.pathname}${targetURL.search}`;
   return `<!DOCTYPE html>
@@ -59,20 +59,16 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
   var frame = document.getElementById('proxy-frame');
   var lastValidSrc = frame.src;
 
-  // Extract the proxied path from an iframe src and validate it
   function isValidProxyUrl(url) {
     try {
       var u = new URL(url);
-      // Must be same origin as worker
       if (u.origin !== WO) return false;
-      // First path segment must look like a domain (contains a dot)
       var seg = u.pathname.split('/')[1];
       if (!seg || !seg.includes('.')) return false;
       return true;
     } catch(e) { return false; }
   }
 
-  // Convert any URL back to its proxied form
   function toProxy(url) {
     try {
       var u = new URL(url, WO + '/' + BH + '/');
@@ -85,11 +81,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
     } catch(e) { return null; }
   }
 
-  // 🔒 CONSTANT POLLING CHECKER - Runs every 50ms
+  // 🔒 POLLING CHECKER - every 50ms
   setInterval(function() {
     try {
       var currentSrc = frame.src;
-      // If src changed and is no longer a valid proxy URL, fix it
       if (currentSrc !== lastValidSrc) {
         if (!isValidProxyUrl(currentSrc)) {
           var fixed = toProxy(currentSrc);
@@ -97,7 +92,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
             frame.src = fixed;
             lastValidSrc = fixed;
           } else {
-            // Can't fix it - restore last known good URL
             frame.src = lastValidSrc;
           }
         } else {
@@ -105,13 +99,10 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
         }
       }
     } catch(e) {
-      // Cross-origin access denied means iframe navigated outside proxy
-      // Force it back to last valid URL
       frame.src = lastValidSrc;
     }
   }, 50);
 
-  // 🔒 ALSO CHECK ON LOAD EVENTS
   frame.addEventListener('load', function() {
     try {
       var currentSrc = frame.src;
@@ -131,9 +122,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
     }
   });
 
-  // 🔒 BLOCK PARENT FRAME NAVIGATION ATTEMPTS
   window.addEventListener('message', function(e) {
-    // Ignore all messages that try to trigger navigation
     if (e.data && typeof e.data === 'object') {
       if (e.data.type === 'navigate' || e.data.type === 'redirect' || e.data.url) {
         e.stopPropagation();
@@ -141,11 +130,9 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
     }
   }, true);
 
-  // 🔒 OVERRIDE window.open IN SHELL TO PREVENT ESCAPE
   window.open = function(u, n, f) {
     var p = toProxy(u);
     if (p && isValidProxyUrl(p)) {
-      // Open inside the iframe instead of new tab
       frame.src = p;
       lastValidSrc = p;
       return null;
@@ -153,7 +140,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
     return null;
   };
 
-  // 🔒 LOCK DOWN PARENT LOCATION
   try {
     var lp = Object.getPrototypeOf(location);
     var od = Object.getOwnPropertyDescriptor(lp, 'href');
@@ -171,7 +157,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
 </html>`;
 }
 
-// Inner content rewriter script (injected INTO the proxied page inside iframe)
+// Inner rewriter injected INTO proxied pages inside the iframe
 const INNER_REWRITER = `<script id="__inner_proxy_rewriter__">
 (function(){
   var WO = "WORKER_ORIGIN_PLACEHOLDER";
@@ -274,33 +260,28 @@ async function handleRequest(request) {
 
   if (isAdRequest(targetURL.href)) return new Response('', { status: 204 });
 
-  // 🔒 Determine if this is a SHELL request or INNER CONTENT request
-  // Shell = direct browser navigation (Accept: text/html, no X-PJAX header)
-  // Inner = subresource or iframe src load
   const accept = request.headers.get('Accept') || '';
   const isPJAX = request.headers.has('X-PJAX');
   const isInnerLoad = request.headers.has('X-Proxy-Inner');
 
-  // Serve SHELL for top-level HTML navigation
+  // ✅ FIXED: Serve shell WITHOUT self-blocking headers
   if (!isInnerLoad && !isPJAX && accept.includes('text/html') && !accept.includes('application/json')) {
-    // Check if this looks like a proxied path (has domain in first segment)
     const firstSeg = targetPath.split('/')[0];
     if (firstSeg && firstSeg.includes('.') && !firstSeg.startsWith('http')) {
-      // This is a proxied site request - serve the iframe shell
       const shell = getShellHTML(workerOrigin, targetURL);
       return new Response(shell, {
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store',
-          'X-Frame-Options': 'DENY',
-          'Content-Security-Policy': "frame-ancestors 'none'"
+          'Cache-Control': 'no-store'
+          // ✅ REMOVED X-Frame-Options: DENY
+          // ✅ REMOVED Content-Security-Policy: frame-ancestors 'none'
         }
       });
     }
   }
 
-  // All other requests: proxy the actual content (loaded inside iframe)
+  // Proxy actual content (loaded inside iframe)
   const headers = new Headers(request.headers);
   headers.set('Host', targetURL.host);
   headers.set('Origin', targetURL.origin);
@@ -324,7 +305,6 @@ async function handleRequest(request) {
     return new Response(`Proxy Error: ${err.message}`, { status: 502 });
   }
 
-  // Block external redirects
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     const loc = response.headers.get('Location');
     if (loc) {
@@ -338,6 +318,7 @@ async function handleRequest(request) {
   }
 
   const respHeaders = new Headers(response.headers);
+  // ✅ CRITICAL: Strip ALL framing restrictions from upstream so iframe can load
   respHeaders.delete('Content-Security-Policy');
   respHeaders.delete('X-Content-Security-Policy');
   respHeaders.delete('X-Frame-Options');
@@ -371,7 +352,6 @@ async function handleRequest(request) {
     html = blockAdsInHTML(html);
     html = deepRewriteHtml(html, targetURL, workerOrigin);
 
-    // Inject INNER rewriter (not the shell interceptor)
     const innerScript = INNER_REWRITER
       .replace('WORKER_ORIGIN_PLACEHOLDER', workerOrigin)
       .replace('BASE_ORIGIN_PLACEHOLDER', targetURL.origin);
