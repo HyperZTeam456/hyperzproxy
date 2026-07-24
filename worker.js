@@ -37,13 +37,15 @@ const AD_PATTERNS = [
   'advertis', 'banner', 'popup'
 ];
 
-// ✅ BULLETPROOF NAV INTERCEPTOR
-const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
+// ✅ AGGRESSIVE NAVIGATION LOCKDOWN INTERCEPTOR
+const NAV_INTERCEPTOR = `<script id="__proxy_nav_lockdown__">
 (function(){
   var WO = "WORKER_ORIGIN_PLACEHOLDER";
   var BO = "BASE_ORIGIN_PLACEHOLDER";
   var BH = "BASE_HOST_PLACEHOLDER";
+  var ALLOWED_ORIGIN = location.origin;
 
+  // Core proxy resolver - returns null for anything that can't be safely proxied
   function toProxy(url) {
     if (!url || typeof url !== 'string') return null;
     var t = url.trim();
@@ -52,19 +54,16 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
 
     try {
       var abs;
-      // Resolve absolute/protocol-relative against base origin
       if (/^(https?:)?\/\//i.test(t)) {
         abs = new URL(t, BO + '/');
       } else {
-        // Resolve relative URLs against the CURRENT proxied page
-        // This prevents double-host and keeps navigation inside proxy
         abs = new URL(t, location.href);
       }
 
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
 
-      // Already proxied correctly? Return as-is
-      if (abs.origin === location.origin) {
+      // Already correctly proxied
+      if (abs.origin === ALLOWED_ORIGIN) {
         var seg = abs.pathname.split('/')[1];
         if (seg && seg.includes('.')) return abs.href;
       }
@@ -73,35 +72,43 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
     } catch(e) { return null; }
   }
 
-  // Rewrite all links on page immediately
+  // Validate that a URL stays inside the proxy - BLOCK everything else
+  function validateOrBlock(url) {
+    var proxied = toProxy(url);
+    if (!proxied) return null;
+    // Final safety check: must start with worker origin
+    if (!proxied.startsWith(WO + '/')) return null;
+    return proxied;
+  }
+
+  // Eagerly rewrite all navigable elements
   function rewriteAllLinks() {
-    document.querySelectorAll('a[href], [data-href], [data-link], [data-redirect]').forEach(function(el) {
-      var attrs = ['href', 'data-href', 'data-link', 'data-redirect'];
-      attrs.forEach(function(attr) {
+    document.querySelectorAll('a[href], [data-href], [data-link], [data-redirect], [data-navigate]').forEach(function(el) {
+      ['href', 'data-href', 'data-link', 'data-redirect', 'data-navigate'].forEach(function(attr) {
         var val = el.getAttribute(attr);
         if (val) {
-          var p = toProxy(val);
-          if (p && p !== val) el.setAttribute(attr, p);
+          var p = validateOrBlock(val);
+          if (p) el.setAttribute(attr, p);
+          else if (attr === 'href') el.removeAttribute('href'); // Kill un-proxiable links
         }
       });
     });
     document.querySelectorAll('form[action]').forEach(function(el) {
       var val = el.getAttribute('action');
       if (val) {
-        var p = toProxy(val);
-        if (p && p !== val) el.setAttribute('action', p);
+        var p = validateOrBlock(val);
+        if (p) el.setAttribute('action', p);
       }
     });
   }
 
-  // Run immediately and on DOM ready
   rewriteAllLinks();
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', rewriteAllLinks);
   }
   window.addEventListener('load', rewriteAllLinks);
 
-  // Capture-phase click handler (beats ALL site handlers)
+  // 🔒 AGGRESSIVE CLICK LOCKDOWN - capture phase, blocks ALL non-proxy navigation
   document.addEventListener('click', function(e) {
     var el = e.target;
     while (el && el !== document) {
@@ -110,36 +117,53 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
     }
     if (!el || el.tagName !== 'A') return;
 
-    var href = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('data-link');
+    var href = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('data-link') || el.getAttribute('data-redirect');
     if (!href) return;
 
-    var proxied = toProxy(href);
-    if (proxied && proxied !== href) {
-      // Update the visible href so hover shows correct URL
-      el.setAttribute('href', proxied);
+    var proxied = validateOrBlock(href);
+
+    // 🔒 BLOCK: If URL cannot be proxied, prevent navigation entirely
+    if (!proxied) {
       e.preventDefault();
       e.stopImmediatePropagation();
       e.stopPropagation();
-      if (el.target === '_blank' || e.metaKey || e.ctrlKey) {
-        window.open(proxied, '_blank');
-      } else {
-        history.pushState(null, '', proxied);
-        window.dispatchEvent(new PopStateEvent('popstate'));
-      }
+      console.warn('[Proxy Lockdown] Blocked non-proxy navigation:', href);
+      return;
+    }
+
+    // Update visible href so hover shows correct URL
+    el.setAttribute('href', proxied);
+
+    // Only allow navigation through the proxy
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    e.stopPropagation();
+
+    if (el.target === '_blank' || e.metaKey || e.ctrlKey) {
+      window.open(proxied, '_blank');
+    } else {
+      history.pushState(null, '', proxied);
+      window.dispatchEvent(new PopStateEvent('popstate'));
     }
   }, true);
 
-  // Form submission
+  // 🔒 BLOCK form submissions to non-proxy URLs
   document.addEventListener('submit', function(e) {
     var form = e.target;
     if (form && form.tagName === 'FORM') {
       var action = form.getAttribute('action') || '';
-      var proxied = toProxy(action);
-      if (proxied) form.setAttribute('action', proxied);
+      var proxied = validateOrBlock(action);
+      if (!proxied) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        console.warn('[Proxy Lockdown] Blocked non-proxy form submission:', action);
+        return;
+      }
+      form.setAttribute('action', proxied);
     }
   }, true);
 
-  // Monkey-patch Location.prototype.href
+  // 🔒 LOCK DOWN location.href setter - ONLY allow proxied URLs
   try {
     var locProto = Object.getPrototypeOf(location);
     var origHrefDesc = Object.getOwnPropertyDescriptor(locProto, 'href');
@@ -147,50 +171,81 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
       Object.defineProperty(locProto, 'href', {
         get: origHrefDesc.get,
         set: function(v) {
-          var p = toProxy(v);
-          origHrefDesc.set.call(this, p || v);
+          var p = validateOrBlock(v);
+          if (!p) {
+            console.warn('[Proxy Lockdown] Blocked location.href assignment:', v);
+            return; // SILENTLY BLOCK
+          }
+          origHrefDesc.set.call(this, p);
         },
         configurable: true, enumerable: true
       });
     }
   } catch(e) {}
 
-  // Monkey-patch window.open
+  // 🔒 LOCK DOWN window.open
   var origOpen = window.open;
   window.open = function(u, n, f) {
-    var p = u ? toProxy(u) : null;
-    return origOpen.call(window, p || u, n, f);
+    if (u) {
+      var p = validateOrBlock(u);
+      if (!p) {
+        console.warn('[Proxy Lockdown] Blocked window.open:', u);
+        return null;
+      }
+      u = p;
+    }
+    return origOpen.call(window, u, n, f);
   };
 
-  // Monkey-patch history
+  // 🔒 LOCK DOWN history.pushState / replaceState
   var origPush = history.pushState;
   var origReplace = history.replaceState;
   history.pushState = function(s, t, u) {
-    var p = u ? toProxy(u) : null;
-    return origPush.call(history, s, t, p || u);
+    if (u) {
+      var p = validateOrBlock(u);
+      if (!p) {
+        console.warn('[Proxy Lockdown] Blocked pushState:', u);
+        return;
+      }
+      u = p;
+    }
+    return origPush.call(history, s, t, u);
   };
   history.replaceState = function(s, t, u) {
-    var p = u ? toProxy(u) : null;
-    return origReplace.call(history, s, t, p || u);
+    if (u) {
+      var p = validateOrBlock(u);
+      if (!p) {
+        console.warn('[Proxy Lockdown] Blocked replaceState:', u);
+        return;
+      }
+      u = p;
+    }
+    return origReplace.call(history, s, t, u);
   };
 
-  // Catch back/forward navigation escape
+  // 🔒 CATCH back/forward escape attempts
   window.addEventListener('popstate', function() {
     var seg = location.pathname.split('/')[1];
-    if (seg && !seg.includes('.') && seg !== '') {
-      var fixed = toProxy(location.pathname + location.search + location.hash);
-      if (fixed) history.replaceState(null, '', fixed);
+    if (!seg || !seg.includes('.')) {
+      // Escaped proxy namespace - force back
+      var fixed = validateOrBlock(location.pathname + location.search + location.hash);
+      if (fixed) {
+        history.replaceState(null, '', fixed);
+      } else {
+        // Can't fix it - go back to proxy root
+        history.replaceState(null, '', WO + '/' + BH + '/');
+      }
     }
   });
 
-  // Monkey-patch fetch/XHR
+  // 🔒 LOCK DOWN fetch/XHR to prevent API-driven redirects
   var origFetch = window.fetch;
   window.fetch = function(input, init) {
     if (typeof input === 'string') {
-      var p = toProxy(input);
+      var p = validateOrBlock(input);
       if (p) input = p;
     } else if (input instanceof Request) {
-      var p = toProxy(input.url);
+      var p = validateOrBlock(input.url);
       if (p) input = new Request(p, input);
     }
     return origFetch.call(window, input, init);
@@ -198,28 +253,43 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
 
   var origXHROpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(m, u) {
-    var p = toProxy(u);
-    arguments[1] = p || u;
+    var p = validateOrBlock(u);
+    if (p) arguments[1] = p;
     return origXHROpen.apply(this, arguments);
   };
 
-  // MutationObserver for dynamic content
+  // 🔒 BLOCK beforeunload/unload redirect tricks
+  window.addEventListener('beforeunload', function(e) {
+    // Prevent sites from redirecting during unload
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
+  // MutationObserver with lockdown
   var obs = new MutationObserver(function(muts) {
     muts.forEach(function(m) {
       if (m.type === 'childList') {
         m.addedNodes.forEach(function(n) {
           if (n.nodeType !== 1) return;
           if (n.tagName === 'A') {
-            ['href','data-href','data-link','data-redirect'].forEach(function(a){
+            ['href','data-href','data-link','data-redirect','data-navigate'].forEach(function(a){
               var v = n.getAttribute(a);
-              if(v){var p=toProxy(v);if(p)n.setAttribute(a,p);}
+              if(v){
+                var p = validateOrBlock(v);
+                if(p) n.setAttribute(a,p);
+                else if(a==='href') n.removeAttribute('href');
+              }
             });
           }
           if (n.querySelectorAll) {
             n.querySelectorAll('a[href], [data-href], [data-link]').forEach(function(el) {
-              ['href','data-href','data-link','data-redirect'].forEach(function(a){
+              ['href','data-href','data-link','data-redirect','data-navigate'].forEach(function(a){
                 var v = el.getAttribute(a);
-                if(v){var p=toProxy(v);if(p)el.setAttribute(a,p);}
+                if(v){
+                  var p = validateOrBlock(v);
+                  if(p) el.setAttribute(a,p);
+                  else if(a==='href') el.removeAttribute('href');
+                }
               });
             });
           }
@@ -228,10 +298,11 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
       if (m.type === 'attributes') {
         var el = m.target;
         var attr = m.attributeName;
-        if (['href','action','src','data-href','data-link','data-redirect'].indexOf(attr) > -1 && el.nodeType === 1) {
+        if (['href','action','src','data-href','data-link','data-redirect','data-navigate'].indexOf(attr) > -1 && el.nodeType === 1) {
           var val = el.getAttribute(attr);
-          var p = toProxy(val);
-          if (p && p !== val) el.setAttribute(attr, p);
+          var p = validateOrBlock(val);
+          if (p) el.setAttribute(attr, p);
+          else if (attr === 'href') el.removeAttribute('href');
         }
       }
     });
@@ -241,7 +312,7 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
     if (document.documentElement) {
       obs.observe(document.documentElement, {
         childList: true, subtree: true, attributes: true,
-        attributeFilter: ['href','action','src','data-href','data-link','data-redirect']
+        attributeFilter: ['href','action','src','data-href','data-link','data-redirect','data-navigate']
       });
     } else {
       setTimeout(startObs, 10);
@@ -299,11 +370,18 @@ async function handleRequest(request) {
     return new Response(`Proxy Error: ${err.message}`, { status: 502 });
   }
 
+  // 🔒 SERVER-SIDE REDIRECT LOCKDOWN
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     const loc = response.headers.get('Location');
     if (loc) {
       urlCache.clear();
-      return Response.redirect(rewriteUrl(loc, targetURL, workerOrigin), response.status);
+      const rewritten = rewriteUrl(loc, targetURL, workerOrigin);
+      // Only allow redirect if it stays in proxy
+      if (rewritten && rewritten.startsWith(workerOrigin + '/')) {
+        return Response.redirect(rewritten, response.status);
+      }
+      // Block external redirect - return 403 instead of following
+      return new Response(`Blocked external redirect: ${loc}`, { status: 403 });
     }
   }
 
@@ -316,6 +394,8 @@ async function handleRequest(request) {
   respHeaders.delete('Cross-Origin-Opener-Policy');
   respHeaders.delete('Cross-Origin-Embedder-Policy');
   respHeaders.delete('Cross-Origin-Resource-Policy');
+  // 🔒 Block meta refresh redirects server-side too
+  respHeaders.delete('Refresh');
   respHeaders.set('Access-Control-Allow-Origin', '*');
   respHeaders.set('Access-Control-Allow-Methods', '*');
   respHeaders.set('Access-Control-Allow-Headers', '*');
@@ -414,6 +494,9 @@ function blockAdsInHTML(html) {
 function deepRewriteHtml(html, baseUrl, workerOrigin) {
   html = html.replace(RE_HEAD, `<head$1><base href="${baseUrl.origin}/">`);
 
+  // 🔒 Strip ALL meta refresh tags server-side
+  html = html.replace(/<meta[^>]*http-equiv\s*=\s*["']refresh["'][^>]*>/gi, '');
+
   html = html.replace(RE_HTML_TAG, (fullMatch, tagName, attrs) => {
     const rewrittenAttrs = attrs.replace(RE_ATTR, (attrMatch, attrName, dqVal, sqVal, uqVal) => {
       const lowerAttr = attrName.toLowerCase();
@@ -467,22 +550,6 @@ function deepRewriteHtml(html, baseUrl, workerOrigin) {
       return open + rewriteJsUrls(content, baseUrl, workerOrigin) + close;
     }
     return m;
-  });
-
-  html = html.replace(RE_META_REFRESH, (match, attrs) => {
-    const contentMatch = attrs.match(RE_META_CONTENT);
-    if (contentMatch) {
-      const content = contentMatch[1];
-      const urlPart = content.match(/;\s*url\s*=\s*(.+)/i);
-      if (urlPart) {
-        const rw = resolveAndProxy(urlPart[1], baseUrl, workerOrigin);
-        if (rw !== null) {
-          const newContent = content.replace(urlPart[1], rw);
-          return `<meta${attrs.replace(contentMatch[0], `content="${newContent}"`)}>`;
-        }
-      }
-    }
-    return match;
   });
 
   return html;
