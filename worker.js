@@ -2,7 +2,7 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
-// Pre-compiled regexes at module scope
+// Pre-compiled regexes
 const RE_SCRIPT_AD = /<script[^>]*(?:googlesyndication|adsbygoogle|doubleclick|google-analytics|googletagmanager)[^>]*>[\s\S]*?<\/script>/gi;
 const RE_IFRAME_AD = /<iframe[^>]*(?:googlesyndication|doubleclick|google-analytics)[^>]*>[\s\S]*?<\/iframe>/gi;
 const RE_INS_AD = /<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi;
@@ -20,7 +20,8 @@ const URL_ATTRS = new Set([
   'src', 'href', 'action', 'data-src', 'data-href', 'data-url',
   'poster', 'background', 'cite', 'formaction', 'icon', 'manifest',
   'dynsrc', 'lowsrc', 'srcset', 'data-bg', 'data-image',
-  'data-lazy-src', 'data-original', 'data-actualsrc', 'data-thumb'
+  'data-lazy-src', 'data-original', 'data-actualsrc', 'data-thumb',
+  'data-link', 'data-target', 'data-redirect', 'data-navigate'
 ]);
 
 const AD_PATTERNS = [
@@ -36,64 +37,86 @@ const AD_PATTERNS = [
   'advertis', 'banner', 'popup'
 ];
 
-// ✅ FIXED NAV INTERCEPTOR - No double-path, proper redirect capture
+// ✅ BULLETPROOF NAV INTERCEPTOR
 const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
 (function(){
   var WO = "WORKER_ORIGIN_PLACEHOLDER";
   var BO = "BASE_ORIGIN_PLACEHOLDER";
   var BH = "BASE_HOST_PLACEHOLDER";
 
-  // Resolve any URL to its proxied form
   function toProxy(url) {
     if (!url || typeof url !== 'string') return null;
     var t = url.trim();
     if (!t) return null;
-    // Skip non-navigable schemes
     if (/^(data:|blob:|mailto:|tel:|#|javascript:|about:)/i.test(t)) return null;
 
     try {
       var abs;
-      // If it looks absolute or protocol-relative, resolve against base origin
+      // Resolve absolute/protocol-relative against base origin
       if (/^(https?:)?\/\//i.test(t)) {
         abs = new URL(t, BO + '/');
       } else {
-        // Relative URL - resolve against CURRENT proxied location
-        // This prevents double-host prefixing
+        // Resolve relative URLs against the CURRENT proxied page
+        // This prevents double-host and keeps navigation inside proxy
         abs = new URL(t, location.href);
       }
 
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
 
-      // Already proxied? Return as-is
+      // Already proxied correctly? Return as-is
       if (abs.origin === location.origin) {
-        // Check if path already starts with /host/
-        var pathParts = abs.pathname.split('/');
-        if (pathParts[1] && pathParts[1].includes('.')) {
-          return abs.href;
-        }
+        var seg = abs.pathname.split('/')[1];
+        if (seg && seg.includes('.')) return abs.href;
       }
 
       return WO + '/' + abs.host + abs.pathname + abs.search + abs.hash;
-    } catch(e) {
-      return null;
-    }
+    } catch(e) { return null; }
   }
 
-  // 1. Capture-phase click handler on document (beats all site handlers)
+  // Rewrite all links on page immediately
+  function rewriteAllLinks() {
+    document.querySelectorAll('a[href], [data-href], [data-link], [data-redirect]').forEach(function(el) {
+      var attrs = ['href', 'data-href', 'data-link', 'data-redirect'];
+      attrs.forEach(function(attr) {
+        var val = el.getAttribute(attr);
+        if (val) {
+          var p = toProxy(val);
+          if (p && p !== val) el.setAttribute(attr, p);
+        }
+      });
+    });
+    document.querySelectorAll('form[action]').forEach(function(el) {
+      var val = el.getAttribute('action');
+      if (val) {
+        var p = toProxy(val);
+        if (p && p !== val) el.setAttribute('action', p);
+      }
+    });
+  }
+
+  // Run immediately and on DOM ready
+  rewriteAllLinks();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', rewriteAllLinks);
+  }
+  window.addEventListener('load', rewriteAllLinks);
+
+  // Capture-phase click handler (beats ALL site handlers)
   document.addEventListener('click', function(e) {
-    // Walk up to find nearest <a> (works even with shadow DOM boundary crossing)
     var el = e.target;
     while (el && el !== document) {
-      if (el.tagName === 'A' && el.hasAttribute('href')) break;
+      if (el.tagName === 'A') break;
       el = el.parentElement || el.parentNode;
     }
     if (!el || el.tagName !== 'A') return;
 
-    var href = el.getAttribute('href');
+    var href = el.getAttribute('href') || el.getAttribute('data-href') || el.getAttribute('data-link');
     if (!href) return;
 
     var proxied = toProxy(href);
     if (proxied && proxied !== href) {
+      // Update the visible href so hover shows correct URL
+      el.setAttribute('href', proxied);
       e.preventDefault();
       e.stopImmediatePropagation();
       e.stopPropagation();
@@ -106,7 +129,7 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
     }
   }, true);
 
-  // 2. Form submission interception
+  // Form submission
   document.addEventListener('submit', function(e) {
     var form = e.target;
     if (form && form.tagName === 'FORM') {
@@ -116,7 +139,7 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
     }
   }, true);
 
-  // 3. Monkey-patch Location.prototype.href (catches ALL location assignments)
+  // Monkey-patch Location.prototype.href
   try {
     var locProto = Object.getPrototypeOf(location);
     var origHrefDesc = Object.getOwnPropertyDescriptor(locProto, 'href');
@@ -127,20 +150,19 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
           var p = toProxy(v);
           origHrefDesc.set.call(this, p || v);
         },
-        configurable: true,
-        enumerable: true
+        configurable: true, enumerable: true
       });
     }
   } catch(e) {}
 
-  // 4. Monkey-patch window.open
+  // Monkey-patch window.open
   var origOpen = window.open;
   window.open = function(u, n, f) {
     var p = u ? toProxy(u) : null;
     return origOpen.call(window, p || u, n, f);
   };
 
-  // 5. Monkey-patch history methods
+  // Monkey-patch history
   var origPush = history.pushState;
   var origReplace = history.replaceState;
   history.pushState = function(s, t, u) {
@@ -152,18 +174,16 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
     return origReplace.call(history, s, t, p || u);
   };
 
-  // 6. Intercept popstate (back/forward buttons)
+  // Catch back/forward navigation escape
   window.addEventListener('popstate', function() {
-    // After popstate, check if current path escaped the proxy
-    var parts = location.pathname.split('/');
-    if (parts[1] && !parts[1].includes('.') && parts[1] !== '') {
-      // Path doesn't start with a domain - we escaped, fix it
+    var seg = location.pathname.split('/')[1];
+    if (seg && !seg.includes('.') && seg !== '') {
       var fixed = toProxy(location.pathname + location.search + location.hash);
       if (fixed) history.replaceState(null, '', fixed);
     }
   });
 
-  // 7. Monkey-patch fetch/XHR
+  // Monkey-patch fetch/XHR
   var origFetch = window.fetch;
   window.fetch = function(input, init) {
     if (typeof input === 'string') {
@@ -183,25 +203,24 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
     return origXHROpen.apply(this, arguments);
   };
 
-  // 8. MutationObserver for dynamic content
+  // MutationObserver for dynamic content
   var obs = new MutationObserver(function(muts) {
-    for (var i = 0; i < muts.length; i++) {
-      var m = muts[i];
+    muts.forEach(function(m) {
       if (m.type === 'childList') {
         m.addedNodes.forEach(function(n) {
           if (n.nodeType !== 1) return;
-          // Rewrite links
-          if (n.tagName === 'A' && n.hasAttribute('href')) {
-            var h = n.getAttribute('href');
-            var p = toProxy(h);
-            if (p) n.setAttribute('href', p);
+          if (n.tagName === 'A') {
+            ['href','data-href','data-link','data-redirect'].forEach(function(a){
+              var v = n.getAttribute(a);
+              if(v){var p=toProxy(v);if(p)n.setAttribute(a,p);}
+            });
           }
-          // Rewrite child links
           if (n.querySelectorAll) {
-            n.querySelectorAll('a[href]').forEach(function(a) {
-              var h = a.getAttribute('href');
-              var p = toProxy(h);
-              if (p) a.setAttribute('href', p);
+            n.querySelectorAll('a[href], [data-href], [data-link]').forEach(function(el) {
+              ['href','data-href','data-link','data-redirect'].forEach(function(a){
+                var v = el.getAttribute(a);
+                if(v){var p=toProxy(v);if(p)el.setAttribute(a,p);}
+              });
             });
           }
         });
@@ -209,32 +228,26 @@ const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
       if (m.type === 'attributes') {
         var el = m.target;
         var attr = m.attributeName;
-        if ((attr === 'href' || attr === 'action' || attr === 'src') && el.nodeType === 1) {
+        if (['href','action','src','data-href','data-link','data-redirect'].indexOf(attr) > -1 && el.nodeType === 1) {
           var val = el.getAttribute(attr);
           var p = toProxy(val);
           if (p && p !== val) el.setAttribute(attr, p);
         }
       }
-    }
+    });
   });
 
-  if (document.documentElement) {
-    obs.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['href', 'action', 'src']
-    });
-  } else {
-    document.addEventListener('DOMContentLoaded', function() {
+  function startObs() {
+    if (document.documentElement) {
       obs.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['href', 'action', 'src']
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ['href','action','src','data-href','data-link','data-redirect']
       });
-    });
+    } else {
+      setTimeout(startObs, 10);
+    }
   }
+  startObs();
 })();
 </script>`;
 
@@ -327,7 +340,6 @@ async function handleRequest(request) {
     html = blockAdsInHTML(html);
     html = deepRewriteHtml(html, targetURL, workerOrigin);
 
-    // ✅ Inject with all three placeholders replaced
     const interceptor = NAV_INTERCEPTOR
       .replace('WORKER_ORIGIN_PLACEHOLDER', workerOrigin)
       .replace('BASE_ORIGIN_PLACEHOLDER', targetURL.origin)
@@ -359,13 +371,10 @@ async function handleRequest(request) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers: respHeaders });
 }
 
-// --- Optimized Rewriting Engine ---
-
 function resolveAndProxy(urlStr, baseUrl, workerOrigin) {
   if (!urlStr || typeof urlStr !== 'string') return null;
   const trimmed = urlStr.trim();
   if (!trimmed) return null;
-
   const firstChar = trimmed.charCodeAt(0);
   if (firstChar === 35 || firstChar === 106) return null;
   if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') ||
@@ -439,7 +448,7 @@ function deepRewriteHtml(html, baseUrl, workerOrigin) {
         }
       }
 
-      if (lowerAttr.startsWith('data-') && (value.startsWith('http://') || value.startsWith('https://'))) {
+      if (lowerAttr.startsWith('data-') && (value.startsWith('http://') || value.startsWith('https://') || value.startsWith('//'))) {
         const rw = resolveAndProxy(value, baseUrl, workerOrigin);
         return rw !== null ? `${attrName}=${quote}${rw}${quote}` : attrMatch;
       }
