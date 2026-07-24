@@ -36,30 +36,28 @@ const AD_PATTERNS = [
   'advertis', 'banner', 'popup'
 ];
 
-// ✅ Client-side navigation interceptor - THE FIX FOR CLICK REDIRECTS
-const NAV_INTERCEPTOR = `
-<script id="__proxy_nav_interceptor__">
+// ✅ FIXED: Plain string placeholders instead of ${} template expressions
+const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
 (function(){
-  var WO = ${JSON.stringify(WORKER_ORIGIN_PLACEHOLDER)};
-  var BO = ${JSON.stringify(BASE_ORIGIN_PLACEHOLDER)};
+  var WO = "WORKER_ORIGIN_PLACEHOLDER";
+  var BO = "BASE_ORIGIN_PLACEHOLDER";
 
   function toProxy(url) {
     if (!url || typeof url !== 'string') return url;
     var t = url.trim();
-    if (!t || t.startsWith('data:') || t.startsWith('blob:') || 
-        t.startsWith('mailto:') || t.startsWith('tel:') || 
-        t.startsWith('#') || t.startsWith('javascript:') || 
+    if (!t || t.startsWith('data:') || t.startsWith('blob:') ||
+        t.startsWith('mailto:') || t.startsWith('tel:') ||
+        t.startsWith('#') || t.startsWith('javascript:') ||
         t.startsWith('about:')) return url;
     try {
       var abs = new URL(t, BO + '/');
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return url;
-      // Already proxied? Don't double-proxy
       if (abs.origin === location.origin && abs.pathname.startsWith('/' + abs.host)) return url;
       return WO + '/' + abs.host + abs.pathname + abs.search;
     } catch(e) { return url; }
   }
 
-  // 1. Intercept <a> clicks (catches dynamically added links too)
+  // 1. Intercept <a> clicks (capture phase beats site handlers)
   document.addEventListener('click', function(e) {
     var el = e.target.closest ? e.target.closest('a[href]') : null;
     if (!el) return;
@@ -89,7 +87,7 @@ const NAV_INTERCEPTOR = `
     }
   }, true);
 
-  // 3. Monkey-patch window.location assignments
+  // 3. Monkey-patch window.location.href setter
   var origLocationDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
   if (origLocationDesc && origLocationDesc.set) {
     Object.defineProperty(location, 'href', {
@@ -115,7 +113,7 @@ const NAV_INTERCEPTOR = `
     return origReplace.call(history, s, t, u ? toProxy(u) : u);
   };
 
-  // 6. Intercept fetch/XHR for API calls that return redirect URLs
+  // 6. Intercept fetch/XHR
   var origFetch = window.fetch;
   window.fetch = function(input, init) {
     if (typeof input === 'string') input = toProxy(input);
@@ -252,18 +250,18 @@ async function handleRequest(request) {
     urlCache.clear();
     html = blockAdsInHTML(html);
     html = deepRewriteHtml(html, targetURL, workerOrigin);
-    
-    // ✅ Inject navigation interceptor with correct origins baked in
+
+    // ✅ Inject navigation interceptor with origins baked in via .replace()
     const interceptor = NAV_INTERCEPTOR
       .replace('WORKER_ORIGIN_PLACEHOLDER', workerOrigin)
       .replace('BASE_ORIGIN_PLACEHOLDER', targetURL.origin);
-    
+
     if (html.match(RE_HEAD)) {
       html = html.replace(RE_HEAD, `$&${interceptor}`);
     } else {
       html = interceptor + html;
     }
-    
+
     return new Response(html, { status: response.status, statusText: response.statusText, headers: respHeaders });
   }
 
