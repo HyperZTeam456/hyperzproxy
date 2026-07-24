@@ -1,4 +1,4 @@
-name = "cldmnp"
+name = "proxy"
 account_id = "" # <-- Add your Cloudflare account ID
 workers_dev = true
 compatibility_date = "2026-01-21"
