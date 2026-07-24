@@ -35,7 +35,7 @@ const AD_PATTERNS = [
   'advertis', 'banner', 'popup'
 ];
 
-// ✅ FIXED SHELL - No self-blocking headers, allows same-origin framing
+// ✅ FIXED SHELL - No sandbox, white bg, fullscreen allowed, containment via JS only
 function getShellHTML(workerOrigin, targetURL) {
   const proxySrc = `${workerOrigin}/${targetURL.host}${targetURL.pathname}${targetURL.search}`;
   return `<!DOCTYPE html>
@@ -46,12 +46,12 @@ function getShellHTML(workerOrigin, targetURL) {
 <title>${targetURL.host} - HyperZ Proxy</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;background:#0d1117}
-#proxy-frame{width:100%;height:100%;border:none;display:block}
+html,body{width:100%;height:100%;overflow:hidden;background:#fff}
+#proxy-frame{position:fixed;top:0;left:0;width:100vw;height:100vh;border:none;display:block;z-index:999999}
 </style>
 </head>
 <body>
-<iframe id="proxy-frame" src="${proxySrc}" sandbox="allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock" allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad" referrerpolicy="no-referrer-when-downgrade"></iframe>
+<iframe id="proxy-frame" src="${proxySrc}" allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad;fullscreen;picture-in-picture" referrerpolicy="no-referrer-when-downgrade"></iframe>
 <script>
 (function(){
   var WO = "${workerOrigin}";
@@ -264,7 +264,7 @@ async function handleRequest(request) {
   const isPJAX = request.headers.has('X-PJAX');
   const isInnerLoad = request.headers.has('X-Proxy-Inner');
 
-  // ✅ FIXED: Serve shell WITHOUT self-blocking headers
+  // Serve shell for top-level HTML navigation to proxied sites
   if (!isInnerLoad && !isPJAX && accept.includes('text/html') && !accept.includes('application/json')) {
     const firstSeg = targetPath.split('/')[0];
     if (firstSeg && firstSeg.includes('.') && !firstSeg.startsWith('http')) {
@@ -274,8 +274,6 @@ async function handleRequest(request) {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store'
-          // ✅ REMOVED X-Frame-Options: DENY
-          // ✅ REMOVED Content-Security-Policy: frame-ancestors 'none'
         }
       });
     }
@@ -305,6 +303,7 @@ async function handleRequest(request) {
     return new Response(`Proxy Error: ${err.message}`, { status: 502 });
   }
 
+  // Block external redirects server-side
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     const loc = response.headers.get('Location');
     if (loc) {
@@ -318,7 +317,7 @@ async function handleRequest(request) {
   }
 
   const respHeaders = new Headers(response.headers);
-  // ✅ CRITICAL: Strip ALL framing restrictions from upstream so iframe can load
+  // Strip ALL framing/security restrictions from upstream
   respHeaders.delete('Content-Security-Policy');
   respHeaders.delete('X-Content-Security-Policy');
   respHeaders.delete('X-Frame-Options');
