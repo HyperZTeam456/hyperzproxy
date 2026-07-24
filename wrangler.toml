@@ -1,5 +1,4 @@
-name = "proxy"
-account_id = "" # <-- Add your Cloudflare account ID
+name = "hyperzproxy"
 workers_dev = true
 compatibility_date = "2026-01-21"
 main = "worker.js"
