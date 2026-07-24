@@ -2,7 +2,7 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
-// Pre-compiled regexes at module scope for V8 isolate reuse
+// Pre-compiled regexes at module scope
 const RE_SCRIPT_AD = /<script[^>]*(?:googlesyndication|adsbygoogle|doubleclick|google-analytics|googletagmanager)[^>]*>[\s\S]*?<\/script>/gi;
 const RE_IFRAME_AD = /<iframe[^>]*(?:googlesyndication|doubleclick|google-analytics)[^>]*>[\s\S]*?<\/iframe>/gi;
 const RE_INS_AD = /<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi;
@@ -36,129 +36,205 @@ const AD_PATTERNS = [
   'advertis', 'banner', 'popup'
 ];
 
-// ✅ FIXED: Plain string placeholders instead of ${} template expressions
+// ✅ FIXED NAV INTERCEPTOR - No double-path, proper redirect capture
 const NAV_INTERCEPTOR = `<script id="__proxy_nav_interceptor__">
 (function(){
   var WO = "WORKER_ORIGIN_PLACEHOLDER";
   var BO = "BASE_ORIGIN_PLACEHOLDER";
+  var BH = "BASE_HOST_PLACEHOLDER";
 
+  // Resolve any URL to its proxied form
   function toProxy(url) {
-    if (!url || typeof url !== 'string') return url;
+    if (!url || typeof url !== 'string') return null;
     var t = url.trim();
-    if (!t || t.startsWith('data:') || t.startsWith('blob:') ||
-        t.startsWith('mailto:') || t.startsWith('tel:') ||
-        t.startsWith('#') || t.startsWith('javascript:') ||
-        t.startsWith('about:')) return url;
+    if (!t) return null;
+    // Skip non-navigable schemes
+    if (/^(data:|blob:|mailto:|tel:|#|javascript:|about:)/i.test(t)) return null;
+
     try {
-      var abs = new URL(t, BO + '/');
-      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return url;
-      if (abs.origin === location.origin && abs.pathname.startsWith('/' + abs.host)) return url;
-      return WO + '/' + abs.host + abs.pathname + abs.search;
-    } catch(e) { return url; }
+      var abs;
+      // If it looks absolute or protocol-relative, resolve against base origin
+      if (/^(https?:)?\/\//i.test(t)) {
+        abs = new URL(t, BO + '/');
+      } else {
+        // Relative URL - resolve against CURRENT proxied location
+        // This prevents double-host prefixing
+        abs = new URL(t, location.href);
+      }
+
+      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
+
+      // Already proxied? Return as-is
+      if (abs.origin === location.origin) {
+        // Check if path already starts with /host/
+        var pathParts = abs.pathname.split('/');
+        if (pathParts[1] && pathParts[1].includes('.')) {
+          return abs.href;
+        }
+      }
+
+      return WO + '/' + abs.host + abs.pathname + abs.search + abs.hash;
+    } catch(e) {
+      return null;
+    }
   }
 
-  // 1. Intercept <a> clicks (capture phase beats site handlers)
+  // 1. Capture-phase click handler on document (beats all site handlers)
   document.addEventListener('click', function(e) {
-    var el = e.target.closest ? e.target.closest('a[href]') : null;
-    if (!el) return;
+    // Walk up to find nearest <a> (works even with shadow DOM boundary crossing)
+    var el = e.target;
+    while (el && el !== document) {
+      if (el.tagName === 'A' && el.hasAttribute('href')) break;
+      el = el.parentElement || el.parentNode;
+    }
+    if (!el || el.tagName !== 'A') return;
+
     var href = el.getAttribute('href');
     if (!href) return;
+
     var proxied = toProxy(href);
-    if (proxied !== href) {
+    if (proxied && proxied !== href) {
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (el.target === '_blank') {
+      e.stopPropagation();
+      if (el.target === '_blank' || e.metaKey || e.ctrlKey) {
         window.open(proxied, '_blank');
       } else {
-        location.href = proxied;
+        history.pushState(null, '', proxied);
+        window.dispatchEvent(new PopStateEvent('popstate'));
       }
     }
   }, true);
 
-  // 2. Intercept form submissions
+  // 2. Form submission interception
   document.addEventListener('submit', function(e) {
     var form = e.target;
     if (form && form.tagName === 'FORM') {
       var action = form.getAttribute('action') || '';
       var proxied = toProxy(action);
-      if (proxied !== action) {
-        form.setAttribute('action', proxied);
-      }
+      if (proxied) form.setAttribute('action', proxied);
     }
   }, true);
 
-  // 3. Monkey-patch window.location.href setter
-  var origLocationDesc = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
-  if (origLocationDesc && origLocationDesc.set) {
-    Object.defineProperty(location, 'href', {
-      get: function() { return origLocationDesc.get.call(location); },
-      set: function(v) { origLocationDesc.set.call(location, toProxy(v)); },
-      configurable: true
-    });
-  }
+  // 3. Monkey-patch Location.prototype.href (catches ALL location assignments)
+  try {
+    var locProto = Object.getPrototypeOf(location);
+    var origHrefDesc = Object.getOwnPropertyDescriptor(locProto, 'href');
+    if (origHrefDesc && origHrefDesc.set) {
+      Object.defineProperty(locProto, 'href', {
+        get: origHrefDesc.get,
+        set: function(v) {
+          var p = toProxy(v);
+          origHrefDesc.set.call(this, p || v);
+        },
+        configurable: true,
+        enumerable: true
+      });
+    }
+  } catch(e) {}
 
   // 4. Monkey-patch window.open
   var origOpen = window.open;
   window.open = function(u, n, f) {
-    return origOpen.call(window, u ? toProxy(u) : u, n, f);
+    var p = u ? toProxy(u) : null;
+    return origOpen.call(window, p || u, n, f);
   };
 
-  // 5. Monkey-patch history.pushState / replaceState (SPA router fix)
+  // 5. Monkey-patch history methods
   var origPush = history.pushState;
   var origReplace = history.replaceState;
   history.pushState = function(s, t, u) {
-    return origPush.call(history, s, t, u ? toProxy(u) : u);
+    var p = u ? toProxy(u) : null;
+    return origPush.call(history, s, t, p || u);
   };
   history.replaceState = function(s, t, u) {
-    return origReplace.call(history, s, t, u ? toProxy(u) : u);
+    var p = u ? toProxy(u) : null;
+    return origReplace.call(history, s, t, p || u);
   };
 
-  // 6. Intercept fetch/XHR
+  // 6. Intercept popstate (back/forward buttons)
+  window.addEventListener('popstate', function() {
+    // After popstate, check if current path escaped the proxy
+    var parts = location.pathname.split('/');
+    if (parts[1] && !parts[1].includes('.') && parts[1] !== '') {
+      // Path doesn't start with a domain - we escaped, fix it
+      var fixed = toProxy(location.pathname + location.search + location.hash);
+      if (fixed) history.replaceState(null, '', fixed);
+    }
+  });
+
+  // 7. Monkey-patch fetch/XHR
   var origFetch = window.fetch;
   window.fetch = function(input, init) {
-    if (typeof input === 'string') input = toProxy(input);
-    else if (input instanceof Request) input = new Request(toProxy(input.url), input);
+    if (typeof input === 'string') {
+      var p = toProxy(input);
+      if (p) input = p;
+    } else if (input instanceof Request) {
+      var p = toProxy(input.url);
+      if (p) input = new Request(p, input);
+    }
     return origFetch.call(window, input, init);
   };
 
   var origXHROpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function(m, u) {
-    arguments[1] = toProxy(u);
+    var p = toProxy(u);
+    arguments[1] = p || u;
     return origXHROpen.apply(this, arguments);
   };
 
-  // 7. MutationObserver for dynamically injected links
+  // 8. MutationObserver for dynamic content
   var obs = new MutationObserver(function(muts) {
     for (var i = 0; i < muts.length; i++) {
       var m = muts[i];
       if (m.type === 'childList') {
         m.addedNodes.forEach(function(n) {
-          if (n.nodeType === 1) {
-            if (n.tagName === 'A' && n.hasAttribute('href')) {
-              var h = n.getAttribute('href');
-              var p = toProxy(h);
-              if (p !== h) n.setAttribute('href', p);
-            }
-            var links = n.querySelectorAll ? n.querySelectorAll('a[href]') : [];
-            links.forEach(function(a) {
+          if (n.nodeType !== 1) return;
+          // Rewrite links
+          if (n.tagName === 'A' && n.hasAttribute('href')) {
+            var h = n.getAttribute('href');
+            var p = toProxy(h);
+            if (p) n.setAttribute('href', p);
+          }
+          // Rewrite child links
+          if (n.querySelectorAll) {
+            n.querySelectorAll('a[href]').forEach(function(a) {
               var h = a.getAttribute('href');
               var p = toProxy(h);
-              if (p !== h) a.setAttribute('href', p);
+              if (p) a.setAttribute('href', p);
             });
           }
         });
       }
-      if (m.type === 'attributes' && m.attributeName === 'href') {
+      if (m.type === 'attributes') {
         var el = m.target;
-        if (el.tagName === 'A') {
-          var h = el.getAttribute('href');
-          var p = toProxy(h);
-          if (p !== h) el.setAttribute('href', p);
+        var attr = m.attributeName;
+        if ((attr === 'href' || attr === 'action' || attr === 'src') && el.nodeType === 1) {
+          var val = el.getAttribute(attr);
+          var p = toProxy(val);
+          if (p && p !== val) el.setAttribute(attr, p);
         }
       }
     }
   });
-  obs.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'action'] });
+
+  if (document.documentElement) {
+    obs.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['href', 'action', 'src']
+    });
+  } else {
+    document.addEventListener('DOMContentLoaded', function() {
+      obs.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['href', 'action', 'src']
+      });
+    });
+  }
 })();
 </script>`;
 
@@ -251,10 +327,11 @@ async function handleRequest(request) {
     html = blockAdsInHTML(html);
     html = deepRewriteHtml(html, targetURL, workerOrigin);
 
-    // ✅ Inject navigation interceptor with origins baked in via .replace()
+    // ✅ Inject with all three placeholders replaced
     const interceptor = NAV_INTERCEPTOR
       .replace('WORKER_ORIGIN_PLACEHOLDER', workerOrigin)
-      .replace('BASE_ORIGIN_PLACEHOLDER', targetURL.origin);
+      .replace('BASE_ORIGIN_PLACEHOLDER', targetURL.origin)
+      .replace('BASE_HOST_PLACEHOLDER', targetURL.host);
 
     if (html.match(RE_HEAD)) {
       html = html.replace(RE_HEAD, `$&${interceptor}`);
