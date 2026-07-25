@@ -35,7 +35,6 @@ const AD_PATTERNS = [
   'advertis', 'banner', 'popup'
 ];
 
-// ✅ FIXED SHELL - No sandbox, white bg, fullscreen allowed, containment via JS only
 function getShellHTML(workerOrigin, targetURL) {
   const proxySrc = `${workerOrigin}/${targetURL.host}${targetURL.pathname}${targetURL.search}`;
   return `<!DOCTYPE html>
@@ -81,7 +80,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#fff}
     } catch(e) { return null; }
   }
 
-  // 🔒 POLLING CHECKER - every 50ms
   setInterval(function() {
     try {
       var currentSrc = frame.src;
@@ -146,7 +144,7 @@ html,body{width:100%;height:100%;overflow:hidden;background:#fff}
     if (od && od.set) {
       Object.defineProperty(lp, 'href', {
         get: od.get,
-        set: function(v) { /* SILENTLY BLOCK ALL PARENT NAVIGATION */ },
+        set: function(v) {},
         configurable: true, enumerable: true
       });
     }
@@ -157,7 +155,6 @@ html,body{width:100%;height:100%;overflow:hidden;background:#fff}
 </html>`;
 }
 
-// Inner rewriter injected INTO proxied pages inside the iframe
 const INNER_REWRITER = `<script id="__inner_proxy_rewriter__">
 (function(){
   var WO = "WORKER_ORIGIN_PLACEHOLDER";
@@ -260,26 +257,35 @@ async function handleRequest(request) {
 
   if (isAdRequest(targetURL.href)) return new Response('', { status: 204 });
 
+  // ✅ FIXED SHELL DETECTION: Only serve shell for TRUE top-level navigations
+  // Must be: navigate mode + accepts HTML + not a subresource + path looks like a domain
   const accept = request.headers.get('Accept') || '';
-  const isPJAX = request.headers.has('X-PJAX');
-  const isInnerLoad = request.headers.has('X-Proxy-Inner');
+  const secFetchMode = request.headers.get('Sec-Fetch-Mode') || '';
+  const secFetchDest = request.headers.get('Sec-Fetch-Dest') || '';
+  const isNavigate = secFetchMode === 'navigate' || secFetchDest === 'document';
+  const acceptsHtml = accept.includes('text/html');
+  const rejectsNonHtml = !accept.includes('application/json') && !accept.includes('text/css') && !accept.includes('application/javascript') && !accept.includes('image/') && !accept.includes('font/');
+  const firstSeg = targetPath.split('/')[0];
+  const looksLikeDomain = firstSeg && firstSeg.includes('.') && !firstSeg.startsWith('http');
 
-  // Serve shell for top-level HTML navigation to proxied sites
-  if (!isInnerLoad && !isPJAX && accept.includes('text/html') && !accept.includes('application/json')) {
-    const firstSeg = targetPath.split('/')[0];
-    if (firstSeg && firstSeg.includes('.') && !firstSeg.startsWith('http')) {
-      const shell = getShellHTML(workerOrigin, targetURL);
-      return new Response(shell, {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store'
-        }
-      });
-    }
+  // Path has file extension? It's a subresource, NOT a page navigation
+  const lastSeg = targetPath.split('/').pop() || '';
+  const hasFileExtension = /\.[a-zA-Z0-9]{2,5}$/.test(lastSeg);
+
+  const shouldServeShell = isNavigate && acceptsHtml && rejectsNonHtml && looksLikeDomain && !hasFileExtension;
+
+  if (shouldServeShell) {
+    const shell = getShellHTML(workerOrigin, targetURL);
+    return new Response(shell, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store'
+      }
+    });
   }
 
-  // Proxy actual content (loaded inside iframe)
+  // Everything else: proxy raw content (this feeds the iframe)
   const headers = new Headers(request.headers);
   headers.set('Host', targetURL.host);
   headers.set('Origin', targetURL.origin);
@@ -303,7 +309,6 @@ async function handleRequest(request) {
     return new Response(`Proxy Error: ${err.message}`, { status: 502 });
   }
 
-  // Block external redirects server-side
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     const loc = response.headers.get('Location');
     if (loc) {
@@ -317,7 +322,6 @@ async function handleRequest(request) {
   }
 
   const respHeaders = new Headers(response.headers);
-  // Strip ALL framing/security restrictions from upstream
   respHeaders.delete('Content-Security-Policy');
   respHeaders.delete('X-Content-Security-Policy');
   respHeaders.delete('X-Frame-Options');
