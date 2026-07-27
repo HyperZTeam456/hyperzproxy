@@ -293,4 +293,799 @@ function blockAdsInHTML(html) {
 }
 
 function rewriteHtmlUrls(html, baseUrl, workerOrigin) {
-  //
+  // Rewrite src, href, action, etc.
+  html = html.replace(/(src|href|action|data-src|poster|data-href|data-url)\s*=\s*["']([^"']+)["']/gi, (match, attr, val) => {
+    try {
+      const abs = new URL(val, baseUrl.href);
+      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
+        return `${attr}="${workerOrigin}/${abs.host}${abs.pathname}${abs.search}"`;
+      }
+    } catch (e) {}
+    return match;
+  });
+  // Rewrite url() in inline styles
+  html = html.replace(/url\(\s*['"]?([^'")]+)['"]?\s*\)/gi, (match, urlVal) => {
+    try {
+      const abs = new URL(urlVal, baseUrl.href);
+      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
+        return `url('${workerOrigin}/${abs.host}${abs.pathname}${abs.search}')`;
+      }
+    } catch (e) {}
+    return match;
+  });
+  return html;
+}
+
+function rewriteCssUrls(css, baseUrl, workerOrigin) {
+  return css.replace(/url\(\s*['"]?([^'")]+)['"]?\s*\)/gi, (match, urlVal) => {
+    try {
+      const abs = new URL(urlVal, baseUrl.href);
+      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
+        return `url('${workerOrigin}/${abs.host}${abs.pathname}${abs.search}')`;
+      }
+    } catch (e) {}
+    return match;
+  });
+}
+
+function rewriteJsUrls(js, baseUrl, workerOrigin) {
+  js = js.replace(/(["'])(https?:\/\/[^"'\\]+)\1/g, (match, quote, urlVal) => {
+    try {
+      const abs = new URL(urlVal);
+      return `${quote}${workerOrigin}/${abs.host}${abs.pathname}${abs.search}${quote}`;
+    } catch (e) {}
+    return match;
+  });
+  js = js.replace(/(["'])(\/\/[^"'\\]+\.[^"'\\]+)\1/g, (match, quote, urlVal) => {
+    try {
+      const abs = new URL('https:' + urlVal);
+      return `${quote}${workerOrigin}/${abs.host}${abs.pathname}${abs.search}${quote}`;
+    } catch (e) {}
+    return match;
+  });
+  return js;
+}
+
+function getInjectionCode(workerOrigin, baseOrigin) {
+  return `<style id="cm-ad-blocker-css">
+  .a-div-horizontal, .a-div-vertical, .a-div-placeholder, .a-div-box {
+    display: none !important; visibility: hidden !important; opacity: 0 !important;
+    pointer-events: none !important; position: absolute !important;
+    width: 0 !important; height: 0 !important; overflow: hidden !important;
+  }
+</style>
+<script id="cm-fix-js">
+(function(){
+  var WO = "${workerOrigin}";
+  var BO = "${baseOrigin}";
+
+  function toProxy(url) {
+    if (!url || typeof url !== 'string') return null;
+    var t = url.trim();
+    if (!t) return null;
+    if (/^(data:|blob:|mailto:|tel:|#|javascript:|about:)/i.test(t)) return null;
+    try {
+      var abs = new URL(t, location.href);
+      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
+      if (abs.origin === WO) {
+        var seg = abs.pathname.split('/')[1];
+        if (seg && seg.includes('.')) return abs.href;
+      }
+      return WO + '/' + abs.host + abs.pathname + abs.search + abs.hash;
+    } catch(e) { return null; }
+  }
+
+  // Block ad network requests at runtime
+  var originalFetch = window.fetch;
+  window.fetch = function() {
+    var url = arguments[0];
+    if (typeof url === 'string' && isAdUrl(url)) {
+      return Promise.reject(new Error('Ad blocked'));
+    }
+    return originalFetch.apply(this, arguments);
+  };
+
+  var originalXHR = window.XMLHttpRequest.prototype.open;
+  window.XMLHttpRequest.prototype.open = function(method, url) {
+    if (isAdUrl(url)) return;
+    return originalXHR.apply(this, arguments);
+  };
+
+  function isAdUrl(url) {
+    var adPatterns = [
+      'googlesyndication', 'doubleclick', 'googleadservices',
+      'google-analytics', 'googletagmanager', 'googletagservices',
+      '/ads/', '/ad/', '/advert', 'adsense', 'analytics',
+      'facebook.com/ads', 'twitter.com/ads', 'adnxs.com',
+      'advertising.com', 'outbrain.com', 'taboola.com'
+    ];
+    return adPatterns.some(function(p) { return url.toLowerCase().indexOf(p) > -1; });
+  }
+
+  function removeAds() {
+    var selectors = [
+      'iframe[src*="googlesyndication"]', 'iframe[src*="doubleclick"]',
+      'iframe[src*="google-analytics"]', 'div[id*="google_ads"]',
+      'div[class*="adsbygoogle"]', 'ins.adsbygoogle',
+      '[data-ad-slot]', '[data-ad-client]',
+      '.a-div-horizontal', '.a-div-vertical', '.a-div-placeholder', '.a-div-box'
+    ];
+    selectors.forEach(function(sel) {
+      document.querySelectorAll(sel).forEach(function(el) {
+        el.style.display = 'none';
+        try { el.remove(); } catch(e) {}
+      });
+    });
+  }
+
+  removeAds();
+  setInterval(removeAds, 200);
+
+  var observer = new MutationObserver(removeAds);
+  function startObserver() {
+    if (document.body) {
+      observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+      setTimeout(startObserver, 10);
+    }
+  }
+  startObserver();
+
+  // 🔒 LOCK DOWN NAVIGATION - keep everything in proxy
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el !== document) {
+      if (el.tagName === 'A') break;
+      el = el.parentElement || el.parentNode;
+    }
+    if (!el || el.tagName !== 'A') return;
+    var href = el.getAttribute('href');
+    if (!href) return;
+    var p = toProxy(href);
+    if (!p) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (el.target === '_blank' || e.metaKey || e.ctrlKey) {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
+      } else {
+        window.open(p, '_blank');
+      }
+    } else {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
+      } else {
+        location.href = p;
+      }
+    }
+  }, true);
+
+  document.addEventListener('submit', function(e) {
+    var f = e.target;
+    if (f && f.tagName === 'FORM') {
+      var action = f.getAttribute('action') || '';
+      var p = toProxy(action);
+      if (p) f.setAttribute('action', p);
+    }
+  }, true);
+
+  // Patch location.href
+  try {
+    var lp = Object.getPrototypeOf(location);
+    var od = Object.getOwnPropertyDescriptor(lp, 'href');
+    if (od && od.set) {
+      Object.defineProperty(lp, 'href', {
+        get: od.get,
+        set: function(v) {
+          var p = toProxy(v);
+          if (p) {
+            if (window.parent && window.parent !== window) {
+              window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
+            } else {
+              od.set.call(this, p);
+            }
+          }
+        },
+        configurable: true, enumerable: true
+      });
+    }
+  } catch(e) {}
+
+  // Patch window.open
+  var origOpen = window.open;
+  window.open = function(u, n, f) {
+    if (u) {
+      var p = toProxy(u);
+      if (p) {
+        if (window.parent && window.parent !== window) {
+          window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
+          return null;
+        }
+        u = p;
+      }
+    }
+    return origOpen.call(window, u, n, f);
+  };
+
+  // Patch history
+  var op = history.pushState, or = history.replaceState;
+  history.pushState = function(s, t, u) {
+    if (u) { var p = toProxy(u); if (p) u = p; }
+    return op.call(history, s, t, u);
+  };
+  history.replaceState = function(s, t, u) {
+    if (u) { var p = toProxy(u); if (p) u = p; }
+    return or.call(history, s, t, u);
+  };
+
+  // Intercept fullscreen requests
+  window.addEventListener('message', function(event) {
+    if (event.data && event.data.type === 'REQUEST_FULLSCREEN') {
+      var wrapper = document.querySelector('#gameWrapper') || document.documentElement;
+      if (wrapper.requestFullscreen) wrapper.requestFullscreen();
+      else if (wrapper.webkitRequestFullscreen) wrapper.webkitRequestFullscreen();
+    }
+  });
+
+  console.log("[HyperZ Proxy] Initialized with ad blocking and nav lockdown");
+})();
+</script>`;
+}
+
+function getMainHTML() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home - Classroom</title>
+    <meta name="description" content="Google Classroom">
+    
+    <!-- PWA Meta Tags -->
+    <meta name="theme-color" content="#2d2d2d">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Classroom">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/favicon.png">
+    
+    <link rel="icon" id="favicon" type="image/png" href="/favicon.png">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            overflow: hidden;
+        }
+        
+        #container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        #frame-container {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+            background: white;
+            position: relative;
+        }
+
+        /* URL bar */
+        #url-bar {
+            position: fixed;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 999999;
+            display: flex;
+            gap: 5px;
+            background: rgba(22, 27, 34, 0.95);
+            padding: 5px;
+            border-radius: 25px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        #url-input {
+            background: transparent;
+            border: none;
+            outline: none;
+            color: white;
+            padding: 8px 15px;
+            font-size: 14px;
+            width: 300px;
+            border-radius: 20px;
+        }
+        #url-go {
+            background: #58a6ff;
+            color: white;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        #url-go:hover { background: #4293e6; }
+
+        /* Floating button dock — bottom left */
+        #btn-dock {
+            position: fixed;
+            bottom: 18px;
+            left: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 9999;
+            transition: opacity 0.3s;
+        }
+
+        #btn-dock.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .dock-btn {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(45, 45, 45, 0.85);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            color: #e0e0e0;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+            transition: background 0.2s, transform 0.15s;
+        }
+
+        .dock-btn:hover {
+            background: rgba(74, 74, 74, 0.95);
+        }
+
+        .dock-btn:active {
+            transform: scale(0.93);
+        }
+
+        #home-btn {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="frame-container"></div>
+    </div>
+
+    <!-- URL Bar -->
+    <div id="url-bar">
+        <input type="text" id="url-input" placeholder="Enter URL (e.g. example.com)" autocomplete="off" />
+        <button id="url-go">Go</button>
+    </div>
+
+    <!-- Floating bottom-left controls -->
+    <div id="btn-dock">
+        <button class="dock-btn" id="home-btn" onclick="goBack()" title="Home">
+            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0h6"/>
+            </svg>
+        </button>
+        <button class="dock-btn" id="fullscreen-btn" onclick="enterFullscreen()" title="Fullscreen">
+            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
+            </svg>
+        </button>
+    </div>
+
+    <script>
+        var frameContainer = document.getElementById('frame-container');
+        var homeBtn = document.getElementById('home-btn');
+        var btnDock = document.getElementById('btn-dock');
+        var urlInput = document.getElementById('url-input');
+        var urlGo = document.getElementById('url-go');
+        
+        var isShowingGame = false;
+        var mainURL = '/web.cloudmoonapp.com/';
+        var shadowRoots = [];
+        var currentIframe = null;
+        var workerOrigin = window.location.origin;
+        
+        var SANDBOX_HOME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
+        var SANDBOX_GAME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
+        var ALLOW_PERMISSIONS = 'accelerometer; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; clipboard-read; clipboard-write; xr-spatial-tracking; gamepad; fullscreen; picture-in-picture';
+        
+        var SHADOW_LAYERS = 4;
+        
+        function createMultiLayerShadowFrame(url, isGame) {
+            if (isGame === undefined) isGame = false;
+            frameContainer.innerHTML = '';
+            shadowRoots = [];
+            
+            var currentHost = document.createElement('div');
+            currentHost.style.width = '100%';
+            currentHost.style.height = '100%';
+            currentHost.style.margin = '0';
+            currentHost.style.padding = '0';
+            currentHost.style.border = 'none';
+            currentHost.style.display = 'block';
+            currentHost.style.overflow = 'hidden';
+            currentHost.setAttribute('data-id', generateRandomId());
+            currentHost.setAttribute('data-component', 'container');
+            
+            frameContainer.appendChild(currentHost);
+            
+            for (var i = 0; i < SHADOW_LAYERS; i++) {
+                var shadowRoot = currentHost.attachShadow({ mode: 'closed' });
+                shadowRoots.push(shadowRoot);
+                
+                if (i < SHADOW_LAYERS - 1) {
+                    var nextHost = document.createElement('div');
+                    nextHost.style.width = '100%';
+                    nextHost.style.height = '100%';
+                    nextHost.style.margin = '0';
+                    nextHost.style.padding = '0';
+                    nextHost.style.border = 'none';
+                    nextHost.style.display = 'block';
+                    nextHost.style.overflow = 'hidden';
+                    nextHost.setAttribute('data-layer', i.toString());
+                    nextHost.setAttribute('data-id', generateRandomId());
+                    
+                    shadowRoot.appendChild(nextHost);
+                    currentHost = nextHost;
+                    
+                    console.log('%c Shadow Layer ' + (i + 1) + ' created', 'color: #667eea; font-weight: bold;');
+                } else {
+                    var iframe = document.createElement('iframe');
+                    iframe.style.width = '100%';
+                    iframe.style.height = '100%';
+                    iframe.style.border = 'none';
+                    iframe.style.margin = '0';
+                    iframe.style.padding = '0';
+                    iframe.style.display = 'block';
+                    iframe.style.overflow = 'hidden';
+                    
+                    var sandboxAttr = isGame ? SANDBOX_GAME : SANDBOX_HOME;
+                    iframe.setAttribute('sandbox', sandboxAttr);
+                    iframe.setAttribute('allow', ALLOW_PERMISSIONS);
+                    iframe.setAttribute('title', isGame ? 'Game Preview' : 'Proxy Preview');
+                    iframe.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
+                    iframe.setAttribute('importance', 'high');
+                    iframe.setAttribute('loading', 'eager');
+                    iframe.setAttribute('data-frame-id', generateRandomId());
+                    iframe.setAttribute('data-secure', 'true');
+                    
+                    iframe.src = url;
+                    
+                    shadowRoot.appendChild(iframe);
+                    currentIframe = iframe;
+                    
+                    iframe.addEventListener('load', function() {
+                        focusIframe();
+                    });
+                    
+                    iframe.addEventListener('error', function(e) {
+                        console.error('Iframe error:', e);
+                    });
+                    
+                    console.log('%c Final Shadow Layer ' + SHADOW_LAYERS + ' with iframe created', 'color: #10b981; font-weight: bold;');
+                }
+            }
+            
+            console.log('%c ' + SHADOW_LAYERS + '-Layer Shadow DOM Protection Active', 'color: #667eea; font-size: 14px; font-weight: bold;');
+        }
+        
+        function generateRandomId() {
+            return 'x' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
+        }
+        
+        function createShadowFrame(url, isGame) {
+            createMultiLayerShadowFrame(url, isGame);
+        }
+        
+        function focusIframe() {
+            setTimeout(function() {
+                if (currentIframe) {
+                    currentIframe.focus();
+                    try {
+                        currentIframe.contentWindow.focus();
+                    } catch (e) {
+                        // Cross-origin, expected
+                    }
+                }
+            }, 100);
+        }
+        
+        // Initialize with multi-layer shadow DOM
+        createMultiLayerShadowFrame(mainURL, false);
+        
+        document.addEventListener('click', function(e) {
+            if (currentIframe && e.target !== currentIframe) {
+                focusIframe();
+            }
+        });
+        
+        // Listen for navigation messages from iframe
+        window.addEventListener('message', function(event) {
+            if (event.data && event.data.type === 'LOAD_URL') {
+                var targetUrl = event.data.url;
+                console.log('Loading URL in proxy:', targetUrl);
+                loadUrl(targetUrl);
+            }
+            if (event.data && event.data.type === 'LOAD_GAME') {
+                var gameUrl = event.data.url;
+                console.log('Game URL received:', gameUrl);
+                loadGame(gameUrl);
+            }
+        });
+        
+        function loadUrl(url) {
+            if (!url) return;
+            // If it's already a proxied URL (starts with worker origin), use as-is
+            if (url.startsWith(workerOrigin + '/')) {
+                createMultiLayerShadowFrame(url, false);
+                homeBtn.style.display = 'flex';
+                return;
+            }
+            // Otherwise, convert to proxied URL
+            try {
+                var u = new URL(url);
+                var proxyUrl = workerOrigin + '/' + u.host + u.pathname + u.search;
+                createMultiLayerShadowFrame(proxyUrl, false);
+                homeBtn.style.display = 'flex';
+                urlInput.value = u.host + u.pathname;
+            } catch(e) {
+                console.error('Invalid URL:', url);
+            }
+        }
+        
+        function loadGame(url) {
+            var fixedURL = url;
+            
+            // Check if URL is already on our worker domain
+            if (url.includes(workerOrigin)) {
+                fixedURL = url;
+                console.log('Game URL already on worker domain, using directly');
+            } else if (url.includes('://')) {
+                fixedURL = workerOrigin + '/' + new URL(url).host + new URL(url).pathname + new URL(url).search;
+                console.log('External game URL, proxying through worker');
+            } else if (url.startsWith('/')) {
+                fixedURL = url;
+                console.log('Relative game URL, using as-is');
+            }
+            
+            console.log('%c Loading game with ' + SHADOW_LAYERS + '-layer Shadow DOM protection', 'color: #667eea; font-weight: bold;');
+            console.log('Final game URL:', fixedURL);
+            
+            createMultiLayerShadowFrame(fixedURL, true);
+            
+            isShowingGame = true;
+            homeBtn.style.display = 'flex';
+        }
+        
+        function goBack() {
+            createMultiLayerShadowFrame(mainURL, false);
+            isShowingGame = false;
+            homeBtn.style.display = 'none';
+            urlInput.value = '';
+
+            // Exit fullscreen if active
+            if (document.fullscreenElement) {
+                document.exitFullscreen();
+            }
+        }
+
+        function enterFullscreen() {
+            if (currentIframe) {
+                try {
+                    currentIframe.contentWindow.postMessage({type: 'REQUEST_FULLSCREEN'}, '*');
+                    console.log('Sent fullscreen request to game container');
+                } catch (e) {
+                    console.log('Cannot send message to iframe (cross-origin), using fallback');
+                    document.documentElement.requestFullscreen();
+                }
+            } else {
+                document.documentElement.requestFullscreen();
+            }
+            btnDock.classList.add('hidden');
+        }
+
+        document.addEventListener('fullscreenchange', function() {
+            if (!document.fullscreenElement) {
+                btnDock.classList.remove('hidden');
+            }
+        });
+        
+        // URL bar handlers
+        urlGo.addEventListener('click', function() {
+            var val = urlInput.value.trim();
+            if (!val) return;
+            // Auto-add https:// if no protocol
+            if (!val.startsWith('http://') && !val.startsWith('https://')) {
+                val = 'https://' + val;
+            }
+            loadUrl(val);
+        });
+        
+        urlInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                var val = urlInput.value.trim();
+                if (!val) return;
+                if (!val.startsWith('http://') && !val.startsWith('https://')) {
+                    val = 'https://' + val;
+                }
+                loadUrl(val);
+            }
+        });
+        
+        console.log('%c HyperZ Universal Proxy Active', 'color: #667eea; font-size: 18px; font-weight: bold;');
+        console.log('%c Multi-Layer Shadow DOM Protection: ' + SHADOW_LAYERS + ' Layers', 'color: #10b981; font-size: 14px; font-weight: bold;');
+        
+        // Register Service Worker for PWA
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function() {
+                navigator.serviceWorker.register('/sw.js')
+                    .then(function(registration) {
+                        console.log('%c PWA Service Worker registered', 'color: #667eea; font-weight: bold;');
+                        
+                        registration.addEventListener('updatefound', function() {
+                            var newWorker = registration.installing;
+                            newWorker.addEventListener('statechange', function() {
+                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                                    console.log('%c New version available!', 'color: #10b981; font-weight: bold;');
+                                }
+                            });
+                        });
+                    })
+                    .catch(function(error) {
+                        console.log('Service Worker registration failed:', error);
+                    });
+            });
+        }
+        
+        var deferredPrompt;
+        window.addEventListener('beforeinstallprompt', function(e) {
+            e.preventDefault();
+            deferredPrompt = e;
+        });
+        
+        window.addEventListener('appinstalled', function() {
+            deferredPrompt = null;
+        });
+    </script>
+</body>
+</html>`;
+}
+
+function getManifest() {
+  return JSON.stringify({
+    "name": "Google Classroom",
+    "short_name": "Google Classroom",
+    "description": "Google Classroom is a free, secure, and easy-to-use blended learning platform within Google Workspace for Education that allows educators to create, distribute, and grade assignments in one place.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0d1117",
+    "theme_color": "#2d2d2d",
+    "orientation": "any",
+    "scope": "/",
+    "icons": [
+      {
+        "src": "/favicon.png",
+        "sizes": "512x512",
+        "type": "image/png",
+        "purpose": "any maskable"
+      }
+    ],
+    "categories": ["education", "learning"],
+    "screenshots": [],
+    "shortcuts": [
+      {
+        "name": "Open Classroom",
+        "short_name": "Open Classroom",
+        "description": "Open Google Classroom",
+        "url": "/",
+        "icons": [
+          {
+            "src": "/favicon.png",
+            "sizes": "96x96",
+            "type": "image/png"
+          }
+        ]
+      }
+    ]
+  });
+}
+
+function getServiceWorker() {
+  return `// HyperZ Proxy Service Worker
+const CACHE_NAME = 'hyperz-proxy-v1';
+const RUNTIME_CACHE = 'hyperz-runtime';
+
+self.addEventListener('install', function(event) {
+  console.log('[ServiceWorker] Install');
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(function(cache) {
+      console.log('[ServiceWorker] Caching app shell');
+      return cache.addAll([
+        '/',
+        '/manifest.json',
+        '/sw.js',
+        '/favicon.png'
+      ]);
+    }).then(function() {
+      return self.skipWaiting();
+    })
+  );
+});
+
+self.addEventListener('activate', function(event) {
+  console.log('[ServiceWorker] Activate');
+  event.waitUntil(
+    caches.keys().then(function(cacheNames) {
+      return Promise.all(
+        cacheNames.map(function(cacheName) {
+          if (cacheName !== CACHE_NAME && cacheName !== RUNTIME_CACHE) {
+            console.log('[ServiceWorker] Removing old cache', cacheName);
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    }).then(function() {
+      return self.clients.claim();
+    })
+  );
+});
+
+self.addEventListener('fetch', function(event) {
+  if (!event.request.url.startsWith(self.location.origin)) {
+    return;
+  }
+
+  event.respondWith(
+    fetch(event.request)
+      .then(function(response) {
+        if (response && response.status === 200) {
+          var responseToCache = response.clone();
+          caches.open(RUNTIME_CACHE).then(function(cache) {
+            cache.put(event.request, responseToCache);
+          }).catch(function(error) {
+            console.error('[ServiceWorker] Cache put error:', error);
+          });
+        }
+        return response;
+      })
+      .catch(function(error) {
+        console.log('[ServiceWorker] Fetch failed, trying cache:', event.request.url);
+        return caches.match(event.request).then(function(response) {
+          if (response) {
+            return response;
+          }
+          if (event.request.mode === 'navigate') {
+            return caches.match('/');
+          }
+          return new Response('', { 
+            status: 200, 
+            statusText: 'OK',
+            headers: new Headers({ 'Content-Type': 'text/plain' })
+          });
+        });
+      })
+  );
+});
+
+self.addEventListener('message', function(event) {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});`;
+}
