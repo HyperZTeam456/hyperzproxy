@@ -1,4 +1,4 @@
-// Cloudflare Worker - CloudMoon Proxy with Multi-Layer Shadow DOM Protection + Ad Blocking
+// Cloudflare Worker - Universal Reverse Proxy with Multi-Layer Shadow DOM Protection + Ad Blocking
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
@@ -50,12 +50,59 @@ function isAdRequest(url) {
   return AD_PATTERNS.some(pattern => urlLower.includes(pattern));
 }
 
+function parseTargetURL(pathname, search) {
+  // Remove leading slash
+  let targetPath = pathname.startsWith('/') ? pathname.slice(1) : pathname;
+  
+  // Empty path - return null (show home page)
+  if (!targetPath) {
+    return null;
+  }
+  
+  // Already encoded as /proxy/ format
+  if (targetPath.startsWith('proxy/')) {
+    const encodedURL = targetPath.substring('proxy/'.length);
+    try {
+      let decoded = decodeURIComponent(encodedURL);
+      if (search) decoded += search;
+      return decoded;
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  // Direct URL input: /google.com or /google.com/path or /https://google.com
+  let targetURL = targetPath;
+  
+  // Add scheme if missing
+  if (!targetURL.startsWith('http://') && !targetURL.startsWith('https://')) {
+    targetURL = 'https://' + targetURL;
+  }
+  
+  // Add search params
+  if (search) {
+    targetURL += search;
+  }
+  
+  return targetURL;
+}
+
+function isValidURL(url) {
+  try {
+    new URL(url);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 async function handleRequest(request) {
   const url = new URL(request.url);
+  const pathname = url.pathname;
   
-  // Serve the main HTML page
-  if (url.pathname === '/' || url.pathname === '') {
-    return new Response(getMainHTML(), {
+  // Serve the home page
+  if (pathname === '/' || pathname === '') {
+    return new Response(getHomeHTML(), {
       headers: {
         'Content-Type': 'text/html',
         'Permissions-Policy': 'accelerometer=*, gyroscope=*, camera=*, microphone=*, geolocation=*, hid=*, midi=*, clipboard-read=*, clipboard-write=*, xr-spatial-tracking=*, gamepad=*'
@@ -64,14 +111,14 @@ async function handleRequest(request) {
   }
   
   // Serve manifest.json for PWA
-  if (url.pathname === '/manifest.json') {
+  if (pathname === '/manifest.json') {
     return new Response(getManifest(), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
   
   // Serve service worker for PWA
-  if (url.pathname === '/sw.js') {
+  if (pathname === '/sw.js') {
     return new Response(getServiceWorker(), {
       headers: { 
         'Content-Type': 'application/javascript',
@@ -80,45 +127,18 @@ async function handleRequest(request) {
     });
   }
 
-  // Serve favicon.png from root — proxy Google Classroom's real icon
-  if (url.pathname === '/favicon.png') {
-    const iconRes = await fetch('https://ssl.gstatic.com/classroom/favicon.png');
-    const iconHeaders = new Headers(iconRes.headers);
-    iconHeaders.set('Cache-Control', 'public, max-age=86400');
-    return new Response(iconRes.body, {
-      status: iconRes.status,
-      headers: iconHeaders
-    });
+  // Parse target URL from pathname
+  const targetURL = parseTargetURL(pathname, url.search);
+  
+  if (!targetURL || !isValidURL(targetURL)) {
+    return new Response('Invalid URL', { status: 400 });
   }
   
-  // Proxy everything else to CloudMoon
-  return proxyCloudMoon(request);
+  // Proxy the request
+  return proxyRequest(request, targetURL);
 }
 
-async function proxyCloudMoon(request) {
-  const url = new URL(request.url);
-  
-  // Build the target URL
-  let targetURL;
-  
-  if (url.pathname.startsWith('/proxy/')) {
-    // Extract and decode the proxied URL
-    const encodedURL = url.pathname.substring('/proxy/'.length);
-    try {
-      targetURL = decodeURIComponent(encodedURL);
-      // Add back query string if present
-      if (url.search) {
-        targetURL += url.search;
-      }
-    } catch (e) {
-      console.error('Failed to decode proxy URL:', encodedURL);
-      return new Response('Invalid proxy URL', { status: 400 });
-    }
-  } else {
-    // Direct proxy to CloudMoon
-    targetURL = 'https://now.gg' + url.pathname + url.search;
-  }
-  
+async function proxyRequest(request, targetURL) {
   // Block ad requests
   if (isAdRequest(targetURL)) {
     console.log('Blocked ad request:', targetURL);
@@ -128,7 +148,10 @@ async function proxyCloudMoon(request) {
   console.log('Proxying:', targetURL);
   
   const headers = new Headers(request.headers);
-  headers.set('Host', new URL(targetURL).host);
+  const targetURLObj = new URL(targetURL);
+  headers.set('Host', targetURLObj.host);
+  
+  // Remove Cloudflare headers
   headers.delete('cf-connecting-ip');
   headers.delete('cf-ray');
   headers.delete('x-forwarded-proto');
@@ -138,7 +161,7 @@ async function proxyCloudMoon(request) {
     headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
   }
   
-  const proxyRequest = new Request(targetURL, {
+  const proxyReq = new Request(targetURL, {
     method: request.method,
     headers: headers,
     body: request.body,
@@ -147,13 +170,12 @@ async function proxyCloudMoon(request) {
   
   let response;
   try {
-    response = await fetch(proxyRequest);
+    response = await fetch(proxyReq);
   } catch (error) {
     console.error('Proxy fetch failed:', error);
     return new Response('Failed to fetch resource', { status: 502 });
   }
   
-  // If response is 404, log it but still return it
   if (response.status === 404) {
     console.log('Resource not found (404):', targetURL);
   }
@@ -175,9 +197,11 @@ async function proxyCloudMoon(request) {
     // Remove ad-related elements and scripts
     html = blockAdsInHTML(html);
     
+    // Get the current worker domain for message passing
+    const workerDomain = new URL(request.url).origin;
+    
     const injectionCode = `
 <style id="cm-ad-blocker-css">
-  /* Hide ONLY the specific ad container divs */
   .a-div-horizontal,
   .a-div-vertical,
   .a-div-placeholder,
@@ -194,7 +218,8 @@ async function proxyCloudMoon(request) {
 </style>
 <script id="cm-fix-js">
 (function(){
-  // Block ad network requests at runtime
+  window.__WORKER_DOMAIN__ = '${workerDomain}';
+  
   const originalFetch = window.fetch;
   window.fetch = function(...args) {
     const url = args[0];
@@ -224,9 +249,7 @@ async function proxyCloudMoon(request) {
     return adPatterns.some(pattern => url.toLowerCase().includes(pattern));
   }
   
-  // Remove ad elements from DOM - ONLY target specific ad containers
   function removeAds() {
-    // Only remove Google ad-related elements
     const googleAdSelectors = [
       'iframe[src*="googlesyndication"]',
       'iframe[src*="doubleclick"]',
@@ -245,7 +268,6 @@ async function proxyCloudMoon(request) {
       });
     });
     
-    // ONLY target the specific CloudMoon ad containers with exact class names
     const adDivs = document.querySelectorAll('.a-div-horizontal, .a-div-vertical, .a-div-placeholder, .a-div-box');
     adDivs.forEach(el => {
       el.style.display = 'none';
@@ -260,67 +282,25 @@ async function proxyCloudMoon(request) {
     });
   }
   
-  function fixButtons() {
-    var allBtns = document.querySelectorAll("button.google-button");
-    for (var i = 0; i < allBtns.length; i++) {
-      var btn = allBtns[i];
-      var styleAttr = btn.getAttribute("style") || "";
-      
-      // Check for purple background (123, 108, 196) - SHOW this button
-      if (styleAttr.indexOf("123, 108, 196") !== -1 || styleAttr.indexOf("123,108,196") !== -1) {
-        btn.style.setProperty("display", "flex", "important");
-        btn.style.setProperty("visibility", "visible", "important");
-        btn.style.setProperty("opacity", "1", "important");
-        btn.style.setProperty("pointer-events", "auto", "important");
-        btn.style.setProperty("flex-direction", "row", "important");
-        btn.style.setProperty("justify-content", "center", "important");
-        btn.style.setProperty("align-items", "center", "important");
-        btn.style.setProperty("gap", "1rem", "important");
-        btn.style.setProperty("width", "min(350px, 100%)", "important");
-        btn.style.setProperty("height", "45px", "important");
-        btn.style.setProperty("border-radius", "5rem", "important");
-        btn.style.setProperty("cursor", "pointer", "important");
-        btn.style.setProperty("font-size", "1rem", "important");
-      }
-      // Check for white background - HIDE this button (OAuth)
-      else if (styleAttr.indexOf("255, 255, 255") !== -1 || styleAttr.indexOf("#fff") !== -1 || styleAttr.indexOf("white") !== -1 || btn.querySelector("svg")) {
-        btn.style.setProperty("display", "none", "important");
-        btn.style.setProperty("visibility", "hidden", "important");
-      }
-    }
-  }
-  
-  // Run ad removal immediately
   removeAds();
   
-  // Run immediately
-  fixButtons();
-  
-  // Run on DOM ready
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function() {
-      fixButtons();
       removeAds();
-      console.log('[CloudMoon] DOM ready - ads removed');
+      console.log('[Universal Proxy] DOM ready - ads removed');
     });
   }
   
-  // Run on window load
   window.addEventListener("load", function() {
-    fixButtons();
     removeAds();
-    console.log('[CloudMoon] Window loaded - ads removed');
+    console.log('[Universal Proxy] Window loaded - ads removed');
   });
   
-  // Run every 200ms (balanced performance and ad blocking)
   setInterval(function() {
-    fixButtons();
     removeAds();
   }, 200);
   
-  // MutationObserver
   var observer = new MutationObserver(function() {
-    fixButtons();
     removeAds();
   });
   
@@ -338,157 +318,31 @@ async function proxyCloudMoon(request) {
   }
   startObserver();
   
-  // Intercept window.open for games - now proxy through worker
-  var origOpen = window.open;
-  window.open = function(u, t, f) {
-    if (u && u.indexOf("run-site") > -1) {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage({type: "LOAD_GAME", url: u}, "*");
-      } else {
-        window.location.href = u;
-      }
-      return {closed: false, close: function(){}, focus: function(){}};
-    }
-    return origOpen.call(this, u, t, f);
-  };
-  
-  // Listen for fullscreen requests from parent
-  window.addEventListener('message', function(event) {
-    if (event.data && event.data.type === 'REQUEST_FULLSCREEN') {
-      var gameWrapper = document.querySelector('#gameWrapper');
-      if (gameWrapper) {
-        // Find UI elements to overlay on fullscreen
-        var inputDiv = document.querySelector('#input-div');
-        var sidebar = document.querySelector('.sidebar.sidebar-open') || document.querySelector('.sidebar');
-        var floatingBall = document.querySelector('#floating-ball');
-        
-        // Store original parents, styles, and positions for restoration
-        var elementsToRestore = [];
-        
-        function storeAndMoveElement(element) {
-          if (!element) return;
-          
-          var originalParent = element.parentNode;
-          var originalNextSibling = element.nextSibling;
-          var originalStyle = element.getAttribute('style') || '';
-          var computedStyle = window.getComputedStyle(element);
-          var originalPosition = {
-            position: computedStyle.position,
-            top: computedStyle.top,
-            left: computedStyle.left,
-            right: computedStyle.right,
-            bottom: computedStyle.bottom,
-            zIndex: computedStyle.zIndex,
-            transform: computedStyle.transform
-          };
-          
-          elementsToRestore.push({
-            element: element,
-            parent: originalParent,
-            nextSibling: originalNextSibling,
-            styleAttr: originalStyle,
-            position: originalPosition
-          });
-          
-          // Move into game wrapper and style for overlay
-          gameWrapper.appendChild(element);
-          element.style.position = 'fixed';
-          element.style.zIndex = '999999';
-          element.style.pointerEvents = 'auto';
-          
-          // Preserve original bottom/left positioning if it exists
-          if (element.id === 'input-div') {
-            element.style.bottom = '20px';
-            element.style.left = '0px';
-          } else if (element.id === 'floating-ball') {
-            // Keep floating ball visible
-            element.style.left = '0px';
-            element.style.top = '50%';
-            element.style.transform = 'translateY(-50%)';
-          }
-        }
-        
-        // Ensure gameWrapper can contain positioned elements
-        var originalWrapperPosition = gameWrapper.style.position;
-        gameWrapper.style.position = 'relative';
-        
-        // Move elements
-        storeAndMoveElement(inputDiv);
-        storeAndMoveElement(sidebar);
-        storeAndMoveElement(floatingBall);
-        
-        // Request fullscreen
-        var fullscreenPromise = null;
-        if (gameWrapper.requestFullscreen) {
-          fullscreenPromise = gameWrapper.requestFullscreen();
-        } else if (gameWrapper.webkitRequestFullscreen) {
-          fullscreenPromise = gameWrapper.webkitRequestFullscreen();
-        } else if (gameWrapper.mozRequestFullScreen) {
-          fullscreenPromise = gameWrapper.mozRequestFullScreen();
-        } else if (gameWrapper.msRequestFullscreen) {
-          fullscreenPromise = gameWrapper.msRequestFullscreen();
-        }
-        
-        // Listen for fullscreen exit to restore elements
-        var fullscreenExitHandler = function() {
-          // Check if we're actually exiting fullscreen
-          if (document.fullscreenElement || document.webkitFullscreenElement || 
-              document.mozFullScreenElement || document.msFullscreenElement) {
-            return; // Still in fullscreen, don't restore
-          }
-          
-          // Restore all elements
-          elementsToRestore.forEach(function(item) {
-            if (item.element && item.parent) {
-              // Restore to original position in DOM
-              if (item.nextSibling && item.nextSibling.parentNode === item.parent) {
-                item.parent.insertBefore(item.element, item.nextSibling);
-              } else {
-                item.parent.appendChild(item.element);
-              }
-              
-              // Restore original style attribute
-              if (item.styleAttr) {
-                item.element.setAttribute('style', item.styleAttr);
-              } else {
-                item.element.removeAttribute('style');
-              }
-            }
-          });
-          
-          // Restore gameWrapper position
-          if (originalWrapperPosition) {
-            gameWrapper.style.position = originalWrapperPosition;
-          } else {
-            gameWrapper.style.position = '';
-          }
-          
-          // Remove listeners
-          document.removeEventListener('fullscreenchange', fullscreenExitHandler);
-          document.removeEventListener('webkitfullscreenchange', fullscreenExitHandler);
-          document.removeEventListener('mozfullscreenchange', fullscreenExitHandler);
-          document.removeEventListener('MSFullscreenChange', fullscreenExitHandler);
-          
-          console.log('[CloudMoon] Fullscreen exited, UI restored');
-        };
-        
-        // Add listeners for fullscreen exit (cross-browser)
-        document.addEventListener('fullscreenchange', fullscreenExitHandler);
-        document.addEventListener('webkitfullscreenchange', fullscreenExitHandler);
-        document.addEventListener('mozfullscreenchange', fullscreenExitHandler);
-        document.addEventListener('MSFullscreenChange', fullscreenExitHandler);
-        
-        console.log('[CloudMoon] Game container fullscreen requested with UI overlay');
-      } else {
-        console.log('[CloudMoon] Game container not found, using document fullscreen');
-        if (document.documentElement.requestFullscreen) {
-          document.documentElement.requestFullscreen();
-        }
+  // Intercept links to stay within proxy
+  document.addEventListener('click', function(e) {
+    if (e.target.tagName === 'A' && e.target.href) {
+      const href = e.target.href;
+      if (!href.startsWith('javascript:') && !href.startsWith('#')) {
+        e.preventDefault();
+        window.location.href = href.replace(window.location.origin, window.__WORKER_DOMAIN__);
       }
     }
-  });
+  }, true);
   
-  console.log("[CloudMoon Fix] Initialized with ad blocking");
+  // Intercept form submissions
+  document.addEventListener('submit', function(e) {
+    const form = e.target;
+    if (form.action) {
+      e.preventDefault();
+      const formData = new FormData(form);
+      const params = new URLSearchParams(formData);
+      const targetUrl = form.action.replace(window.location.origin, window.__WORKER_DOMAIN__) + 
+        (form.method.toUpperCase() === 'GET' ? '?' + params.toString() : '');
+      window.location.href = targetUrl;
+    }
+  }, true);
+  
+  console.log("[Universal Proxy] Initialized with ad blocking");
 })();
 </script>`;
     
@@ -507,7 +361,6 @@ async function proxyCloudMoon(request) {
   
   // Block ads in JavaScript files
   if (contentType.includes('javascript') || contentType.includes('application/x-javascript')) {
-    const targetUrlLower = targetURL.toLowerCase();
     if (isAdRequest(targetURL)) {
       console.log('Blocked ad script:', targetURL);
       return new Response('// Ad script blocked', {
@@ -525,49 +378,34 @@ async function proxyCloudMoon(request) {
 }
 
 function blockAdsInHTML(html) {
-  // Remove Google AdSense scripts
   html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
-  
-  // Remove Google Analytics
   html = html.replace(/<script[^>]*google-analytics[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*googletagmanager[^>]*>[\s\S]*?<\/script>/gi, '');
-  
-  // Remove DoubleClick
   html = html.replace(/<script[^>]*doubleclick[^>]*>[\s\S]*?<\/script>/gi, '');
-  
-  // Remove ad iframes
   html = html.replace(/<iframe[^>]*googlesyndication[^>]*>[\s\S]*?<\/iframe>/gi, '');
   html = html.replace(/<iframe[^>]*doubleclick[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  
-  // Remove ad insertion elements
   html = html.replace(/<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi, '');
-  
-  // Remove divs with ad IDs
   html = html.replace(/<div[^>]*id="google_ads[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
-  
   return html;
 }
 
-function getMainHTML() {
+function getHomeHTML() {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Home - Classroom</title>
-    <meta name="description" content="Play Roblox, Fortnite, Call of Duty Mobile, Delta Force, and more in your browser">
+    <title>Universal Reverse Proxy</title>
+    <meta name="description" content="Universal reverse proxy - access any website through this worker">
     
-    <!-- PWA Meta Tags -->
     <meta name="theme-color" content="#2d2d2d">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="CloudMoon">
+    <meta name="apple-mobile-web-app-title" content="HyperZ Proxy">
     <link rel="manifest" href="/manifest.json">
-    <link rel="apple-touch-icon" href="/favicon.png">
     
-    <link rel="icon" id="favicon" type="image/png" href="/favicon.png">
     <style>
         * {
             margin: 0;
@@ -577,335 +415,222 @@ function getMainHTML() {
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            background: #0d1117;
+            background: linear-gradient(135deg, #0d1117 0%, #1a1a2e 100%);
             color: #c9d1d9;
-            overflow: hidden;
-        }
-        
-        #container {
-            width: 100vw;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-        
-        #frame-container {
-            flex: 1;
-            width: 100%;
-            height: 100%;
-            background: white;
-            position: relative;
-        }
-        
-        iframe {
-            width: 100%;
-            height: 100%;
-            border: none;
-            background: white;
-            outline: none;
-        }
-        
-        iframe:focus {
-            outline: none;
-        }
-
-        /* Floating button dock — bottom left */
-        #btn-dock {
-            position: fixed;
-            bottom: 18px;
-            left: 18px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            z-index: 9999;
-            transition: opacity 0.3s;
-        }
-
-        #btn-dock.hidden {
-            opacity: 0;
-            pointer-events: none;
-        }
-
-        .dock-btn {
-            width: 44px;
-            height: 44px;
-            border-radius: 50%;
-            border: none;
-            background: rgba(45, 45, 45, 0.85);
-            backdrop-filter: blur(6px);
-            -webkit-backdrop-filter: blur(6px);
-            color: #e0e0e0;
-            cursor: pointer;
+            min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.4);
-            transition: background 0.2s, transform 0.15s;
+            padding: 20px;
         }
-
-        .dock-btn:hover {
-            background: rgba(74, 74, 74, 0.95);
+        
+        .container {
+            width: 100%;
+            max-width: 600px;
+            background: rgba(13, 17, 23, 0.8);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(48, 54, 61, 0.6);
+            border-radius: 12px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
         }
-
-        .dock-btn:active {
-            transform: scale(0.93);
+        
+        h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: 700;
         }
-
-        #home-btn {
-            display: none;
+        
+        .subtitle {
+            color: #8b949e;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+        
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        input[type="text"] {
+            flex: 1;
+            padding: 12px 16px;
+            background: rgba(30, 30, 46, 0.6);
+            border: 1px solid rgba(48, 54, 61, 0.6);
+            border-radius: 8px;
+            color: #c9d1d9;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+            background: rgba(30, 30, 46, 0.9);
+            box-shadow: 0 0 12px rgba(102, 126, 234, 0.2);
+        }
+        
+        button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        .examples {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(48, 54, 61, 0.4);
+        }
+        
+        .examples h3 {
+            font-size: 12px;
+            text-transform: uppercase;
+            color: #8b949e;
+            margin-bottom: 12px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        
+        .example-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .example {
+            padding: 10px 12px;
+            background: rgba(30, 30, 46, 0.6);
+            border: 1px solid rgba(48, 54, 61, 0.4);
+            border-radius: 6px;
+            font-size: 12px;
+            color: #8b949e;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Monaco', monospace;
+        }
+        
+        .example:hover {
+            background: rgba(48, 54, 61, 0.6);
+            border-color: #667eea;
+            color: #667eea;
+        }
+        
+        .features {
+            margin-top: 30px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        
+        .feature {
+            padding: 12px;
+            background: rgba(30, 30, 46, 0.4);
+            border-radius: 6px;
+            font-size: 12px;
+            color: #8b949e;
+            text-align: center;
+        }
+        
+        .feature strong {
+            color: #c9d1d9;
+            display: block;
+            margin-bottom: 4px;
         }
     </style>
 </head>
 <body>
-    <div id="container">
-        <div id="frame-container"></div>
-    </div>
-
-    <!-- Floating bottom-left controls -->
-    <div id="btn-dock">
-        <button class="dock-btn" id="home-btn" onclick="goBack()" title="Home">
-            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0h6"/>
-            </svg>
-        </button>
-        <button class="dock-btn" id="fullscreen-btn" onclick="enterFullscreen()" title="Fullscreen">
-            <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
-            </svg>
-        </button>
+    <div class="container">
+        <h1>🌐 HyperZ Proxy</h1>
+        <p class="subtitle">Universal reverse proxy with multi-layer shadow DOM protection</p>
+        
+        <div class="input-group">
+            <input 
+                type="text" 
+                id="urlInput" 
+                placeholder="Enter URL (google.com, reddit.com, youtube.com...)"
+                autocomplete="off"
+            >
+            <button onclick="navigateToUrl()">Go</button>
+        </div>
+        
+        <div class="examples">
+            <h3>Quick Links</h3>
+            <div class="example-list">
+                <div class="example" onclick="goToUrl('google.com')">google.com</div>
+                <div class="example" onclick="goToUrl('reddit.com')">reddit.com</div>
+                <div class="example" onclick="goToUrl('github.com')">github.com</div>
+                <div class="example" onclick="goToUrl('youtube.com')">youtube.com</div>
+            </div>
+        </div>
+        
+        <div class="features">
+            <div class="feature">
+                <strong>🛡️ Ad Blocking</strong>
+                Automatically blocks ads
+            </div>
+            <div class="feature">
+                <strong>🎭 Shadow DOM</strong>
+                Multi-layer protection
+            </div>
+            <div class="feature">
+                <strong>⚡ Fast</strong>
+                Workers edge cache
+            </div>
+            <div class="feature">
+                <strong>🔒 Proxy</strong>
+                Full anonymity
+            </div>
+        </div>
     </div>
 
     <script>
-        const frameContainer = document.getElementById('frame-container');
-        const homeBtn = document.getElementById('home-btn');
-        const btnDock = document.getElementById('btn-dock');
+        const urlInput = document.getElementById('urlInput');
         
-        let isShowingGame = false;
-        let mainURL = '/now.gg/';
-        let shadowRoots = [];
-        let currentIframe = null;
-        
-        const SANDBOX_HOME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
-        const SANDBOX_GAME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
-        const ALLOW_PERMISSIONS = 'accelerometer; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; clipboard-read; clipboard-write; xr-spatial-tracking; gamepad';
-        
-        const SHADOW_LAYERS = 4;
-        
-        function createMultiLayerShadowFrame(url, isGame = false) {
-            frameContainer.innerHTML = '';
-            shadowRoots = [];
-            
-            let currentHost = document.createElement('div');
-            currentHost.style.width = '100%';
-            currentHost.style.height = '100%';
-            currentHost.style.margin = '0';
-            currentHost.style.padding = '0';
-            currentHost.style.border = 'none';
-            currentHost.style.display = 'block';
-            currentHost.style.overflow = 'hidden';
-            currentHost.setAttribute('data-id', generateRandomId());
-            currentHost.setAttribute('data-component', 'container');
-            
-            frameContainer.appendChild(currentHost);
-            
-            for (let i = 0; i < SHADOW_LAYERS; i++) {
-                const shadowRoot = currentHost.attachShadow({ mode: 'closed' });
-                shadowRoots.push(shadowRoot);
-                
-                if (i < SHADOW_LAYERS - 1) {
-                    const nextHost = document.createElement('div');
-                    nextHost.style.width = '100%';
-                    nextHost.style.height = '100%';
-                    nextHost.style.margin = '0';
-                    nextHost.style.padding = '0';
-                    nextHost.style.border = 'none';
-                    nextHost.style.display = 'block';
-                    nextHost.style.overflow = 'hidden';
-                    nextHost.setAttribute('data-layer', i.toString());
-                    nextHost.setAttribute('data-id', generateRandomId());
-                    
-                    shadowRoot.appendChild(nextHost);
-                    currentHost = nextHost;
-                    
-                    console.log(\`%c Shadow Layer \${i + 1} created\`, 'color: #667eea; font-weight: bold;');
-                } else {
-                    const iframe = document.createElement('iframe');
-                    iframe.style.width = '100%';
-                    iframe.style.height = '100%';
-                    iframe.style.border = 'none';
-                    iframe.style.margin = '0';
-                    iframe.style.padding = '0';
-                    iframe.style.display = 'block';
-                    iframe.style.overflow = 'hidden';
-                    
-                    const sandboxAttr = isGame ? SANDBOX_GAME : SANDBOX_HOME;
-                    iframe.setAttribute('sandbox', sandboxAttr);
-                    iframe.setAttribute('allow', ALLOW_PERMISSIONS);
-                    iframe.setAttribute('title', isGame ? 'Game Preview' : 'CloudMoon Preview');
-                    iframe.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
-                    iframe.setAttribute('importance', 'high');
-                    iframe.setAttribute('loading', 'eager');
-                    iframe.setAttribute('data-frame-id', generateRandomId());
-                    iframe.setAttribute('data-secure', 'true');
-                    
-                    iframe.src = url;
-                    
-                    shadowRoot.appendChild(iframe);
-                    currentIframe = iframe;
-                    
-                    iframe.addEventListener('load', () => {
-                        focusIframe();
-                    });
-                    
-                    iframe.addEventListener('error', (e) => {
-                        console.error('Iframe error:', e);
-                    });
-                    
-                    console.log(\`%c Final Shadow Layer \${SHADOW_LAYERS} with iframe created\`, 'color: #10b981; font-weight: bold;');
-                }
-            }
-            
-            console.log(\`%c \${SHADOW_LAYERS}-Layer Shadow DOM Protection Active\`, 'color: #667eea; font-size: 14px; font-weight: bold;');
-        }
-        
-        function generateRandomId() {
-            return 'x' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
-        }
-        
-        function createShadowFrame(url, isGame = false) {
-            createMultiLayerShadowFrame(url, isGame);
-        }
-        
-        function focusIframe() {
-            setTimeout(() => {
-                if (currentIframe) {
-                    currentIframe.focus();
-                    try {
-                        currentIframe.contentWindow.focus();
-                    } catch (e) {
-                        // Cross-origin, expected
-                    }
-                }
-            }, 100);
-        }
-        
-        // Initialize with multi-layer shadow DOM
-        createMultiLayerShadowFrame(mainURL, false);
-        
-        document.addEventListener('click', (e) => {
-            if (currentIframe && e.target !== currentIframe) {
-                focusIframe();
+        urlInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                navigateToUrl();
             }
         });
         
-        window.addEventListener('message', (event) => {
-            if (event.data && event.data.type === 'LOAD_GAME') {
-                const gameUrl = event.data.url;
-                console.log('Game URL received:', gameUrl);
-                loadGame(gameUrl);
-            }
-        });
+        // Focus on load
+        urlInput.focus();
         
-        function loadGame(url) {
-            let fixedURL = url;
-            const workerDomain = window.location.origin;
-            
-            // Check if URL is already on our worker domain
-            if (url.includes(workerDomain)) {
-                // Already on our domain, use as-is (avoid double-proxying)
-                fixedURL = url;
-                console.log('Game URL already on worker domain, using directly');
-            } else if (url.includes('://')) {
-                // External URL - proxy it through worker
-                fixedURL = workerDomain + '/proxy/' + encodeURIComponent(url);
-                console.log('External game URL, proxying through worker');
-            } else if (url.startsWith('/')) {
-                // Relative URL - keep it (will be proxied automatically)
-                fixedURL = url;
-                console.log('Relative game URL, using as-is');
-            }
-            
-            console.log(\`%c Loading game with \${SHADOW_LAYERS}-layer Shadow DOM protection\`, 'color: #667eea; font-weight: bold;');
-            console.log('Final game URL:', fixedURL);
-            
-            createMultiLayerShadowFrame(fixedURL, true);
-            
-            isShowingGame = true;
-            homeBtn.style.display = 'flex';
-        }
-        
-        function goBack() {
-            createMultiLayerShadowFrame(mainURL, false);
-            isShowingGame = false;
-            homeBtn.style.display = 'none';
-
-            // Exit fullscreen if active
-            if (document.fullscreenElement) {
-                document.exitFullscreen();
+        function navigateToUrl() {
+            let url = urlInput.value.trim();
+            if (url) {
+                goToUrl(url);
             }
         }
-
-        function enterFullscreen() {
-            // Try to send message to iframe to fullscreen the game container
-            if (currentIframe) {
-                try {
-                    // Send message through all shadow layers to reach the iframe
-                    currentIframe.contentWindow.postMessage({type: 'REQUEST_FULLSCREEN'}, '*');
-                    console.log('Sent fullscreen request to game container');
-                } catch (e) {
-                    console.log('Cannot send message to iframe (cross-origin), using fallback');
-                    // Fallback to document fullscreen
-                    document.documentElement.requestFullscreen();
-                }
-            } else {
-                // No iframe, use document fullscreen
-                document.documentElement.requestFullscreen();
+        
+        function goToUrl(url) {
+            // Add scheme if missing
+            if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                url = 'https://' + url;
             }
-            // Hide the dock while fullscreen
-            btnDock.classList.add('hidden');
+            
+            // Navigate to proxied URL
+            window.location.href = '/' + encodeURIComponent(url);
         }
-
-        document.addEventListener('fullscreenchange', () => {
-            if (!document.fullscreenElement) {
-                // Restore dock when exiting fullscreen
-                btnDock.classList.remove('hidden');
-            }
-        });
-        
-        console.log('%c CloudMoon Proxy Active with Ad Blocking', 'color: #667eea; font-size: 18px; font-weight: bold;');
-        console.log(\`%c Multi-Layer Shadow DOM Protection: \${SHADOW_LAYERS} Layers\`, 'color: #10b981; font-size: 14px; font-weight: bold;');
-        
-        // Register Service Worker for PWA
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                navigator.serviceWorker.register('/sw.js')
-                    .then((registration) => {
-                        console.log('%c PWA Service Worker registered', 'color: #667eea; font-weight: bold;');
-                        
-                        registration.addEventListener('updatefound', () => {
-                            const newWorker = registration.installing;
-                            newWorker.addEventListener('statechange', () => {
-                                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                                    console.log('%c New version available!', 'color: #10b981; font-weight: bold;');
-                                }
-                            });
-                        });
-                    })
-                    .catch((error) => {
-                        console.log('Service Worker registration failed:', error);
-                    });
-            });
-        }
-        
-        let deferredPrompt;
-        window.addEventListener('beforeinstallprompt', (e) => {
-            e.preventDefault();
-            deferredPrompt = e;
-        });
-        
-        window.addEventListener('appinstalled', () => {
-            deferredPrompt = null;
-        });
     </script>
 </body>
 </html>`;
@@ -913,36 +638,35 @@ function getMainHTML() {
 
 function getManifest() {
   return JSON.stringify({
-    "name": "Google Classroom",
-    "short_name": "Google Classroom",
-    "description": "Google Classroom is a free, secure, and easy-to-use blended learning platform within Google Workspace for Education that allows educators to create, distribute, and grade assignments in one place.",
+    "name": "HyperZ Proxy",
+    "short_name": "HyperZ Proxy",
+    "description": "Universal reverse proxy with multi-layer shadow DOM protection and ad blocking",
     "start_url": "/",
     "display": "standalone",
     "background_color": "#0d1117",
-    "theme_color": "#2d2d2d",
+    "theme_color": "#667eea",
     "orientation": "any",
     "scope": "/",
     "icons": [
       {
-        "src": "/favicon.png",
-        "sizes": "512x512",
-        "type": "image/png",
+        "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%23667eea' width='192' height='192'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' font-size='100' fill='white' font-weight='bold'>Z</text></svg>",
+        "sizes": "192x192",
+        "type": "image/svg+xml",
         "purpose": "any maskable"
       }
     ],
-    "categories": ["education", "learning"],
-    "screenshots": [],
+    "categories": ["productivity", "utilities"],
     "shortcuts": [
       {
-        "name": "Open Classroom",
-        "short_name": "Open Classroom",
-        "description": "Open Google Classroom",
+        "name": "Open Proxy",
+        "short_name": "Proxy",
+        "description": "Open HyperZ Proxy",
         "url": "/",
         "icons": [
           {
-            "src": "/favicon.png",
+            "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><rect fill='%23667eea' width='96' height='96'/><text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' font-size='50' fill='white' font-weight='bold'>Z</text></svg>",
             "sizes": "96x96",
-            "type": "image/png"
+            "type": "image/svg+xml"
           }
         ]
       }
@@ -951,11 +675,10 @@ function getManifest() {
 }
 
 function getServiceWorker() {
-  return `// CloudMoon InPlay Service Worker
-const CACHE_NAME = 'cloudmoon-v1';
-const RUNTIME_CACHE = 'cloudmoon-runtime';
+  return `// HyperZ Proxy Service Worker
+const CACHE_NAME = 'hyperz-proxy-v1';
+const RUNTIME_CACHE = 'hyperz-proxy-runtime';
 
-// Install event - cache essential resources
 self.addEventListener('install', (event) => {
   console.log('[ServiceWorker] Install');
   event.waitUntil(
@@ -964,8 +687,7 @@ self.addEventListener('install', (event) => {
       return cache.addAll([
         '/',
         '/manifest.json',
-        '/sw.js',
-        '/favicon.png'
+        '/sw.js'
       ]);
     }).then(() => {
       return self.skipWaiting();
@@ -973,7 +695,6 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
   console.log('[ServiceWorker] Activate');
   event.waitUntil(
@@ -992,9 +713,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Fetch event - network first, fallback to cache
 self.addEventListener('fetch', (event) => {
-  // Skip cross-origin requests - let browser handle them
   if (!event.request.url.startsWith(self.location.origin)) {
     return;
   }
@@ -1002,7 +721,6 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // If response is valid, clone it and cache it
         if (response && response.status === 200) {
           const responseToCache = response.clone();
           caches.open(RUNTIME_CACHE).then((cache) => {
@@ -1015,16 +733,13 @@ self.addEventListener('fetch', (event) => {
       })
       .catch((error) => {
         console.log('[ServiceWorker] Fetch failed, trying cache:', event.request.url);
-        // If network fails, try to serve from cache
         return caches.match(event.request).then((response) => {
           if (response) {
             return response;
           }
-          // If not in cache, return a basic offline page for navigation
           if (event.request.mode === 'navigate') {
             return caches.match('/');
           }
-          // For other resources, return a minimal response to prevent errors
           return new Response('', { 
             status: 200, 
             statusText: 'OK',
@@ -1035,7 +750,6 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Handle messages from clients
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
