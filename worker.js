@@ -115,16 +115,8 @@ async function proxyCloudMoon(request) {
       return new Response('Invalid proxy URL', { status: 400 });
     }
   } else {
-    // ✅ ONLY CHANGE: Universal proxy - extract domain from path instead of hardcoded cloudmoon
-    const targetPath = url.pathname.substring(1);
-    if (targetPath.startsWith('http://') || targetPath.startsWith('https://')) {
-      targetURL = targetPath;
-    } else {
-      targetURL = 'https://' + targetPath;
-    }
-    if (url.search) {
-      targetURL += url.search;
-    }
+    // Direct proxy to CloudMoon
+    targetURL = 'https://web.cloudmoonapp.com' + url.pathname + url.search;
   }
   
   // Block ad requests
