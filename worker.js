@@ -1,20 +1,48 @@
-// Cloudflare Worker - Universal Proxy with Multi-Layer Shadow DOM Protection + Ad Blocking
+// Cloudflare Worker - CloudMoon Proxy with Multi-Layer Shadow DOM Protection + Ad Blocking
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
 // Common ad domains and patterns to block
 const AD_PATTERNS = [
-  'googlesyndication.com', 'doubleclick.net', 'googleadservices.com',
-  'google-analytics.com', 'googletagmanager.com', 'googletagservices.com',
-  'adservice.google.com', 'pagead2.googlesyndication.com', 'tpc.googlesyndication.com',
-  'video-ad-stats.googlesyndication.com', 'ads.google.com', 'adssettings.google.com',
-  'static.ads-twitter.com', 'ads-api.twitter.com', 'ads.facebook.com', 'an.facebook.com',
-  'adnxs.com', 'advertising.com', 'outbrain.com', 'taboola.com', 'criteo.com',
-  'pubmatic.com', 'rubiconproject.com', 'openx.net', 'adsafeprotected.com',
-  'moatads.com', 'scorecardresearch.com', '/ads/', '/ad/', '/advert/',
-  '/advertisement/', '/adsense/', '/adserver/', '/analytics/', 'prebid',
-  'advertis', 'banner', 'popup'
+  'googlesyndication.com',
+  'doubleclick.net',
+  'googleadservices.com',
+  'google-analytics.com',
+  'googletagmanager.com',
+  'googletagservices.com',
+  'adservice.google.com',
+  'pagead2.googlesyndication.com',
+  'tpc.googlesyndication.com',
+  'video-ad-stats.googlesyndication.com',
+  'ads.google.com',
+  'adssettings.google.com',
+  'static.ads-twitter.com',
+  'ads-api.twitter.com',
+  'ads.facebook.com',
+  'an.facebook.com',
+  'adnxs.com',
+  'advertising.com',
+  'outbrain.com',
+  'taboola.com',
+  'criteo.com',
+  'pubmatic.com',
+  'rubiconproject.com',
+  'openx.net',
+  'adsafeprotected.com',
+  'moatads.com',
+  'scorecardresearch.com',
+  '/ads/',
+  '/ad/',
+  '/advert/',
+  '/advertisement/',
+  '/adsense/',
+  '/adserver/',
+  '/analytics/',
+  'prebid',
+  'advertis',
+  'banner',
+  'popup'
 ];
 
 function isAdRequest(url) {
@@ -53,160 +81,99 @@ async function handleRequest(request) {
   }
 
   // Serve favicon.png from root — proxy Google Classroom's real icon
-  if (url.pathname === '/favicon.png' || url.pathname === '/favicon.ico') {
-    try {
-      const iconRes = await fetch('https://ssl.gstatic.com/classroom/favicon.png');
-      const iconHeaders = new Headers(iconRes.headers);
-      iconHeaders.set('Cache-Control', 'public, max-age=86400');
-      return new Response(iconRes.body, {
-        status: iconRes.status,
-        headers: iconHeaders
-      });
-    } catch (e) {
-      return new Response('', { status: 404 });
-    }
+  if (url.pathname === '/favicon.png') {
+    const iconRes = await fetch('https://ssl.gstatic.com/classroom/favicon.png');
+    const iconHeaders = new Headers(iconRes.headers);
+    iconHeaders.set('Cache-Control', 'public, max-age=86400');
+    return new Response(iconRes.body, {
+      status: iconRes.status,
+      headers: iconHeaders
+    });
   }
   
-  // Proxy everything else - universal reverse proxy
-  return proxyUniversal(request);
+  // Proxy everything else to CloudMoon
+  return proxyCloudMoon(request);
 }
 
-async function proxyUniversal(request) {
+async function proxyCloudMoon(request) {
   const url = new URL(request.url);
-  const workerOrigin = url.origin;
   
-  // Build the target URL from path
-  // Format: /example.com/path or /https://example.com/path
-  let targetPath = url.pathname.substring(1);
-  if (!targetPath) {
-    return new Response('No target specified', { status: 400 });
-  }
-
+  // Build the target URL
   let targetURL;
-  try {
-    // Auto-apply HTTPS if no protocol specified
-    if (targetPath.startsWith('http://') || targetPath.startsWith('https://')) {
-      targetURL = new URL(targetPath);
-    } else {
-      targetURL = new URL('https://' + targetPath);
-    }
-  } catch (e) {
-    return new Response(`Invalid URL: ${targetPath}`, { status: 400 });
-  }
   
-  // Add back query string if present
-  targetURL.search = url.search;
+  if (url.pathname.startsWith('/proxy/')) {
+    // Extract and decode the proxied URL
+    const encodedURL = url.pathname.substring('/proxy/'.length);
+    try {
+      targetURL = decodeURIComponent(encodedURL);
+      // Add back query string if present
+      if (url.search) {
+        targetURL += url.search;
+      }
+    } catch (e) {
+      console.error('Failed to decode proxy URL:', encodedURL);
+      return new Response('Invalid proxy URL', { status: 400 });
+    }
+  } else {
+    // ✅ ONLY CHANGE: Universal proxy - extract domain from path instead of hardcoded cloudmoon
+    const targetPath = url.pathname.substring(1);
+    if (targetPath.startsWith('http://') || targetPath.startsWith('https://')) {
+      targetURL = targetPath;
+    } else {
+      targetURL = 'https://' + targetPath;
+    }
+    if (url.search) {
+      targetURL += url.search;
+    }
+  }
   
   // Block ad requests
-  if (isAdRequest(targetURL.href)) {
+  if (isAdRequest(targetURL)) {
+    console.log('Blocked ad request:', targetURL);
     return new Response('', { status: 204 });
   }
   
-  // Build upstream request with proper header spoofing
-  const headers = new Headers(request.headers);
-  headers.set('Host', targetURL.host);
-  headers.set('Origin', targetURL.origin);
+  console.log('Proxying:', targetURL);
   
-  // Smart referer handling
-  const referer = request.headers.get('Referer');
-  if (referer) {
-    try {
-      const refURL = new URL(referer);
-      if (refURL.origin === workerOrigin) {
-        const refPath = refURL.pathname.substring(1);
-        const refSeg = refPath.split('/')[0];
-        if (refSeg && refSeg.includes('.')) {
-          headers.set('Referer', 'https://' + refSeg + '/');
-        } else {
-          headers.set('Referer', targetURL.origin + '/');
-        }
-      } else {
-        headers.set('Referer', referer);
-      }
-    } catch(e) {
-      headers.set('Referer', targetURL.origin + '/');
-    }
-  } else {
-    headers.set('Referer', targetURL.origin + '/');
-  }
-
-  // Add proper browser headers
-  if (!headers.has('Accept-Language')) headers.set('Accept-Language', 'en-US,en;q=0.9');
-  if (!headers.has('Sec-Fetch-Site')) headers.set('Sec-Fetch-Site', 'same-origin');
-  if (!headers.has('Sec-Fetch-Mode')) headers.set('Sec-Fetch-Mode', 'navigate');
-  if (!headers.has('Sec-Fetch-Dest')) headers.set('Sec-Fetch-Dest', 'document');
-  if (!headers.has('Upgrade-Insecure-Requests')) headers.set('Upgrade-Insecure-Requests', '1');
-
-  // Remove cloudflare headers
+  const headers = new Headers(request.headers);
+  headers.set('Host', new URL(targetURL).host);
   headers.delete('cf-connecting-ip');
   headers.delete('cf-ray');
   headers.delete('x-forwarded-proto');
   headers.delete('x-real-ip');
-  headers.delete('x-forwarded-for');
   
-  if (!headers.has('User-Agent') || headers.get('User-Agent').includes('Cloudflare')) {
+  if (!headers.has('User-Agent')) {
     headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
   }
   
-  const proxyRequest = new Request(targetURL.href, {
+  const proxyRequest = new Request(targetURL, {
     method: request.method,
     headers: headers,
     body: request.body,
-    redirect: 'manual'
+    redirect: 'follow'
   });
   
   let response;
   try {
     response = await fetch(proxyRequest);
   } catch (error) {
-    return new Response('Failed to fetch resource: ' + error.message, { status: 502 });
-  }
-
-  // Handle redirects - rewrite to stay in proxy
-  if ([301, 302, 303, 307, 308].includes(response.status)) {
-    const loc = response.headers.get('Location');
-    if (loc) {
-      try {
-        const absLoc = new URL(loc, targetURL.href);
-        const rewritten = `${workerOrigin}/${absLoc.host}${absLoc.pathname}${absLoc.search}`;
-        return Response.redirect(rewritten, response.status);
-      } catch (e) {
-        return new Response('Redirect failed', { status: 502 });
-      }
-    }
+    console.error('Proxy fetch failed:', error);
+    return new Response('Failed to fetch resource', { status: 502 });
   }
   
-  // Strip security headers for compatibility
+  // If response is 404, log it but still return it
+  if (response.status === 404) {
+    console.log('Resource not found (404):', targetURL);
+  }
+  
   const newHeaders = new Headers(response.headers);
   newHeaders.set('Access-Control-Allow-Origin', '*');
   newHeaders.set('Access-Control-Allow-Methods', '*');
   newHeaders.set('Access-Control-Allow-Headers', '*');
   newHeaders.set('Access-Control-Allow-Credentials', 'true');
   newHeaders.delete('Content-Security-Policy');
-  newHeaders.delete('Content-Security-Policy-Report-Only');
   newHeaders.delete('X-Frame-Options');
   newHeaders.delete('Frame-Options');
-  newHeaders.delete('Strict-Transport-Security');
-  newHeaders.delete('Cross-Origin-Opener-Policy');
-  newHeaders.delete('Cross-Origin-Embedder-Policy');
-  newHeaders.delete('Cross-Origin-Resource-Policy');
-  newHeaders.delete('X-XSS-Protection');
-  newHeaders.delete('X-Content-Type-Options');
-  newHeaders.delete('Referrer-Policy');
-  newHeaders.delete('Permissions-Policy');
-  newHeaders.delete('Refresh');
-  
-  // Fix cookies
-  const setCookies = response.headers.getAll('Set-Cookie');
-  newHeaders.delete('Set-Cookie');
-  for (const cookie of setCookies) {
-    let fixed = cookie
-      .replace(/Path=([^;]+)/gi, (_, p) => `Path=/${targetURL.host}${p.startsWith('/') ? '' : '/'}${p}`)
-      .replace(/Domain=[^;]+;?\s*/gi, '')
-      .replace(/Secure;?\s*/gi, '');
-    if (!fixed.includes('SameSite=')) fixed += '; SameSite=None';
-    newHeaders.append('Set-Cookie', fixed);
-  }
   
   const contentType = response.headers.get('Content-Type') || '';
   
@@ -216,17 +183,328 @@ async function proxyUniversal(request) {
     // Remove ad-related elements and scripts
     html = blockAdsInHTML(html);
     
-    // Inject navigation lockdown + ad blocking
-    const injectionCode = getInjectionCode(workerOrigin, targetURL.origin);
+    const injectionCode = `
+<style id="cm-ad-blocker-css">
+  /* Hide ONLY the specific ad container divs */
+  .a-div-horizontal,
+  .a-div-vertical,
+  .a-div-placeholder,
+  .a-div-box {
+    display: none !important;
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    position: absolute !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+  }
+</style>
+<script id="cm-fix-js">
+(function(){
+  // Block ad network requests at runtime
+  const originalFetch = window.fetch;
+  window.fetch = function(...args) {
+    const url = args[0];
+    if (typeof url === 'string' && isAdUrl(url)) {
+      console.log('[Ad Blocked]', url);
+      return Promise.reject(new Error('Ad blocked'));
+    }
+    return originalFetch.apply(this, args);
+  };
+  
+  const originalXHR = window.XMLHttpRequest.prototype.open;
+  window.XMLHttpRequest.prototype.open = function(method, url) {
+    if (isAdUrl(url)) {
+      console.log('[Ad Blocked]', url);
+      return;
+    }
+    return originalXHR.apply(this, arguments);
+  };
+  
+  function isAdUrl(url) {
+    const adPatterns = [
+      'googlesyndication', 'doubleclick', 'googleadservices',
+      'google-analytics', 'googletagmanager', 'googletagservices',
+      '/ads/', '/ad/', '/advert', 'adsense', 'analytics',
+      'facebook.com/ads', 'twitter.com/ads'
+    ];
+    return adPatterns.some(pattern => url.toLowerCase().includes(pattern));
+  }
+  
+  // Remove ad elements from DOM - ONLY target specific ad containers
+  function removeAds() {
+    // Only remove Google ad-related elements
+    const googleAdSelectors = [
+      'iframe[src*="googlesyndication"]',
+      'iframe[src*="doubleclick"]',
+      'iframe[src*="google-analytics"]',
+      'div[id*="google_ads"]',
+      'div[class*="adsbygoogle"]',
+      'ins.adsbygoogle',
+      '[data-ad-slot]',
+      '[data-ad-client]'
+    ];
+    
+    googleAdSelectors.forEach(selector => {
+      document.querySelectorAll(selector).forEach(el => {
+        el.style.display = 'none';
+        try { el.remove(); } catch (e) {}
+      });
+    });
+    
+    // ONLY target the specific CloudMoon ad containers with exact class names
+    const adDivs = document.querySelectorAll('.a-div-horizontal, .a-div-vertical, .a-div-placeholder, .a-div-box');
+    adDivs.forEach(el => {
+      el.style.display = 'none';
+      el.style.visibility = 'hidden';
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+      el.style.position = 'absolute';
+      el.style.width = '0';
+      el.style.height = '0';
+      el.style.overflow = 'hidden';
+      try { el.remove(); } catch (e) {}
+    });
+  }
+  
+  function fixButtons() {
+    var allBtns = document.querySelectorAll("button.google-button");
+    for (var i = 0; i < allBtns.length; i++) {
+      var btn = allBtns[i];
+      var styleAttr = btn.getAttribute("style") || "";
+      
+      // Check for purple background (123, 108, 196) - SHOW this button
+      if (styleAttr.indexOf("123, 108, 196") !== -1 || styleAttr.indexOf("123,108,196") !== -1) {
+        btn.style.setProperty("display", "flex", "important");
+        btn.style.setProperty("visibility", "visible", "important");
+        btn.style.setProperty("opacity", "1", "important");
+        btn.style.setProperty("pointer-events", "auto", "important");
+        btn.style.setProperty("flex-direction", "row", "important");
+        btn.style.setProperty("justify-content", "center", "important");
+        btn.style.setProperty("align-items", "center", "important");
+        btn.style.setProperty("gap", "1rem", "important");
+        btn.style.setProperty("width", "min(350px, 100%)", "important");
+        btn.style.setProperty("height", "45px", "important");
+        btn.style.setProperty("border-radius", "5rem", "important");
+        btn.style.setProperty("cursor", "pointer", "important");
+        btn.style.setProperty("font-size", "1rem", "important");
+      }
+      // Check for white background - HIDE this button (OAuth)
+      else if (styleAttr.indexOf("255, 255, 255") !== -1 || styleAttr.indexOf("#fff") !== -1 || styleAttr.indexOf("white") !== -1 || btn.querySelector("svg")) {
+        btn.style.setProperty("display", "none", "important");
+        btn.style.setProperty("visibility", "hidden", "important");
+      }
+    }
+  }
+  
+  // Run ad removal immediately
+  removeAds();
+  
+  // Run immediately
+  fixButtons();
+  
+  // Run on DOM ready
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function() {
+      fixButtons();
+      removeAds();
+      console.log('[CloudMoon] DOM ready - ads removed');
+    });
+  }
+  
+  // Run on window load
+  window.addEventListener("load", function() {
+    fixButtons();
+    removeAds();
+    console.log('[CloudMoon] Window loaded - ads removed');
+  });
+  
+  // Run every 200ms (balanced performance and ad blocking)
+  setInterval(function() {
+    fixButtons();
+    removeAds();
+  }, 200);
+  
+  // MutationObserver
+  var observer = new MutationObserver(function() {
+    fixButtons();
+    removeAds();
+  });
+  
+  function startObserver() {
+    if (document.body) {
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["style", "class"]
+      });
+    } else {
+      setTimeout(startObserver, 10);
+    }
+  }
+  startObserver();
+  
+  // Intercept window.open for games - now proxy through worker
+  var origOpen = window.open;
+  window.open = function(u, t, f) {
+    if (u && u.indexOf("run-site") > -1) {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({type: "LOAD_GAME", url: u}, "*");
+      } else {
+        window.location.href = u;
+      }
+      return {closed: false, close: function(){}, focus: function(){}};
+    }
+    return origOpen.call(this, u, t, f);
+  };
+  
+  // Listen for fullscreen requests from parent
+  window.addEventListener('message', function(event) {
+    if (event.data && event.data.type === 'REQUEST_FULLSCREEN') {
+      var gameWrapper = document.querySelector('#gameWrapper');
+      if (gameWrapper) {
+        // Find UI elements to overlay on fullscreen
+        var inputDiv = document.querySelector('#input-div');
+        var sidebar = document.querySelector('.sidebar.sidebar-open') || document.querySelector('.sidebar');
+        var floatingBall = document.querySelector('#floating-ball');
+        
+        // Store original parents, styles, and positions for restoration
+        var elementsToRestore = [];
+        
+        function storeAndMoveElement(element) {
+          if (!element) return;
+          
+          var originalParent = element.parentNode;
+          var originalNextSibling = element.nextSibling;
+          var originalStyle = element.getAttribute('style') || '';
+          var computedStyle = window.getComputedStyle(element);
+          var originalPosition = {
+            position: computedStyle.position,
+            top: computedStyle.top,
+            left: computedStyle.left,
+            right: computedStyle.right,
+            bottom: computedStyle.bottom,
+            zIndex: computedStyle.zIndex,
+            transform: computedStyle.transform
+          };
+          
+          elementsToRestore.push({
+            element: element,
+            parent: originalParent,
+            nextSibling: originalNextSibling,
+            styleAttr: originalStyle,
+            position: originalPosition
+          });
+          
+          // Move into game wrapper and style for overlay
+          gameWrapper.appendChild(element);
+          element.style.position = 'fixed';
+          element.style.zIndex = '999999';
+          element.style.pointerEvents = 'auto';
+          
+          // Preserve original bottom/left positioning if it exists
+          if (element.id === 'input-div') {
+            element.style.bottom = '20px';
+            element.style.left = '0px';
+          } else if (element.id === 'floating-ball') {
+            // Keep floating ball visible
+            element.style.left = '0px';
+            element.style.top = '50%';
+            element.style.transform = 'translateY(-50%)';
+          }
+        }
+        
+        // Ensure gameWrapper can contain positioned elements
+        var originalWrapperPosition = gameWrapper.style.position;
+        gameWrapper.style.position = 'relative';
+        
+        // Move elements
+        storeAndMoveElement(inputDiv);
+        storeAndMoveElement(sidebar);
+        storeAndMoveElement(floatingBall);
+        
+        // Request fullscreen
+        var fullscreenPromise = null;
+        if (gameWrapper.requestFullscreen) {
+          fullscreenPromise = gameWrapper.requestFullscreen();
+        } else if (gameWrapper.webkitRequestFullscreen) {
+          fullscreenPromise = gameWrapper.webkitRequestFullscreen();
+        } else if (gameWrapper.mozRequestFullScreen) {
+          fullscreenPromise = gameWrapper.mozRequestFullScreen();
+        } else if (gameWrapper.msRequestFullscreen) {
+          fullscreenPromise = gameWrapper.msRequestFullscreen();
+        }
+        
+        // Listen for fullscreen exit to restore elements
+        var fullscreenExitHandler = function() {
+          // Check if we're actually exiting fullscreen
+          if (document.fullscreenElement || document.webkitFullscreenElement || 
+              document.mozFullScreenElement || document.msFullscreenElement) {
+            return; // Still in fullscreen, don't restore
+          }
+          
+          // Restore all elements
+          elementsToRestore.forEach(function(item) {
+            if (item.element && item.parent) {
+              // Restore to original position in DOM
+              if (item.nextSibling && item.nextSibling.parentNode === item.parent) {
+                item.parent.insertBefore(item.element, item.nextSibling);
+              } else {
+                item.parent.appendChild(item.element);
+              }
+              
+              // Restore original style attribute
+              if (item.styleAttr) {
+                item.element.setAttribute('style', item.styleAttr);
+              } else {
+                item.element.removeAttribute('style');
+              }
+            }
+          });
+          
+          // Restore gameWrapper position
+          if (originalWrapperPosition) {
+            gameWrapper.style.position = originalWrapperPosition;
+          } else {
+            gameWrapper.style.position = '';
+          }
+          
+          // Remove listeners
+          document.removeEventListener('fullscreenchange', fullscreenExitHandler);
+          document.removeEventListener('webkitfullscreenchange', fullscreenExitHandler);
+          document.removeEventListener('mozfullscreenchange', fullscreenExitHandler);
+          document.removeEventListener('MSFullscreenChange', fullscreenExitHandler);
+          
+          console.log('[CloudMoon] Fullscreen exited, UI restored');
+        };
+        
+        // Add listeners for fullscreen exit (cross-browser)
+        document.addEventListener('fullscreenchange', fullscreenExitHandler);
+        document.addEventListener('webkitfullscreenchange', fullscreenExitHandler);
+        document.addEventListener('mozfullscreenchange', fullscreenExitHandler);
+        document.addEventListener('MSFullscreenChange', fullscreenExitHandler);
+        
+        console.log('[CloudMoon] Game container fullscreen requested with UI overlay');
+      } else {
+        console.log('[CloudMoon] Game container not found, using document fullscreen');
+        if (document.documentElement.requestFullscreen) {
+          document.documentElement.requestFullscreen();
+        }
+      }
+    }
+  });
+  
+  console.log("[CloudMoon Fix] Initialized with ad blocking");
+})();
+</script>`;
     
     if (html.includes('</head>')) {
       html = html.replace('</head>', injectionCode + '</head>');
     } else {
       html = injectionCode + html;
     }
-    
-    // Rewrite URLs in HTML
-    html = rewriteHtmlUrls(html, targetURL, workerOrigin);
     
     return new Response(html, {
       status: response.status,
@@ -235,41 +513,16 @@ async function proxyUniversal(request) {
     });
   }
   
-  if (contentType.includes('text/css')) {
-    let css = await response.text();
-    css = rewriteCssUrls(css, targetURL, workerOrigin);
-    return new Response(css, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: newHeaders
-    });
-  }
-  
   // Block ads in JavaScript files
   if (contentType.includes('javascript') || contentType.includes('application/x-javascript')) {
-    if (isAdRequest(targetURL.href)) {
+    const targetUrlLower = targetURL.toLowerCase();
+    if (isAdRequest(targetURL)) {
+      console.log('Blocked ad script:', targetURL);
       return new Response('// Ad script blocked', {
         status: 200,
         headers: { 'Content-Type': 'application/javascript' }
       });
     }
-    let js = await response.text();
-    js = rewriteJsUrls(js, targetURL, workerOrigin);
-    return new Response(js, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: newHeaders
-    });
-  }
-  
-  if (contentType.includes('application/json')) {
-    let json = await response.text();
-    json = rewriteJsUrls(json, targetURL, workerOrigin);
-    return new Response(json, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: newHeaders
-    });
   }
   
   return new Response(response.body, {
@@ -280,256 +533,28 @@ async function proxyUniversal(request) {
 }
 
 function blockAdsInHTML(html) {
+  // Remove Google AdSense scripts
   html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
+  
+  // Remove Google Analytics
   html = html.replace(/<script[^>]*google-analytics[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*googletagmanager[^>]*>[\s\S]*?<\/script>/gi, '');
+  
+  // Remove DoubleClick
   html = html.replace(/<script[^>]*doubleclick[^>]*>[\s\S]*?<\/script>/gi, '');
+  
+  // Remove ad iframes
   html = html.replace(/<iframe[^>]*googlesyndication[^>]*>[\s\S]*?<\/iframe>/gi, '');
   html = html.replace(/<iframe[^>]*doubleclick[^>]*>[\s\S]*?<\/iframe>/gi, '');
+  
+  // Remove ad insertion elements
   html = html.replace(/<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi, '');
+  
+  // Remove divs with ad IDs
   html = html.replace(/<div[^>]*id="google_ads[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
+  
   return html;
-}
-
-function rewriteHtmlUrls(html, baseUrl, workerOrigin) {
-  // Rewrite src, href, action, etc.
-  html = html.replace(/(src|href|action|data-src|poster|data-href|data-url)\s*=\s*["']([^"']+)["']/gi, (match, attr, val) => {
-    try {
-      const abs = new URL(val, baseUrl.href);
-      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-        return `${attr}="${workerOrigin}/${abs.host}${abs.pathname}${abs.search}"`;
-      }
-    } catch (e) {}
-    return match;
-  });
-  // Rewrite url() in inline styles
-  html = html.replace(/url\(\s*['"]?([^'")]+)['"]?\s*\)/gi, (match, urlVal) => {
-    try {
-      const abs = new URL(urlVal, baseUrl.href);
-      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-        return `url('${workerOrigin}/${abs.host}${abs.pathname}${abs.search}')`;
-      }
-    } catch (e) {}
-    return match;
-  });
-  return html;
-}
-
-function rewriteCssUrls(css, baseUrl, workerOrigin) {
-  return css.replace(/url\(\s*['"]?([^'")]+)['"]?\s*\)/gi, (match, urlVal) => {
-    try {
-      const abs = new URL(urlVal, baseUrl.href);
-      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-        return `url('${workerOrigin}/${abs.host}${abs.pathname}${abs.search}')`;
-      }
-    } catch (e) {}
-    return match;
-  });
-}
-
-function rewriteJsUrls(js, baseUrl, workerOrigin) {
-  js = js.replace(/(["'])(https?:\/\/[^"'\\]+)\1/g, (match, quote, urlVal) => {
-    try {
-      const abs = new URL(urlVal);
-      return `${quote}${workerOrigin}/${abs.host}${abs.pathname}${abs.search}${quote}`;
-    } catch (e) {}
-    return match;
-  });
-  js = js.replace(/(["'])(\/\/[^"'\\]+\.[^"'\\]+)\1/g, (match, quote, urlVal) => {
-    try {
-      const abs = new URL('https:' + urlVal);
-      return `${quote}${workerOrigin}/${abs.host}${abs.pathname}${abs.search}${quote}`;
-    } catch (e) {}
-    return match;
-  });
-  return js;
-}
-
-function getInjectionCode(workerOrigin, baseOrigin) {
-  return `<style id="cm-ad-blocker-css">
-  .a-div-horizontal, .a-div-vertical, .a-div-placeholder, .a-div-box {
-    display: none !important; visibility: hidden !important; opacity: 0 !important;
-    pointer-events: none !important; position: absolute !important;
-    width: 0 !important; height: 0 !important; overflow: hidden !important;
-  }
-</style>
-<script id="cm-fix-js">
-(function(){
-  var WO = "${workerOrigin}";
-  var BO = "${baseOrigin}";
-
-  function toProxy(url) {
-    if (!url || typeof url !== 'string') return null;
-    var t = url.trim();
-    if (!t) return null;
-    if (/^(data:|blob:|mailto:|tel:|#|javascript:|about:)/i.test(t)) return null;
-    try {
-      var abs = new URL(t, location.href);
-      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
-      if (abs.origin === WO) {
-        var seg = abs.pathname.split('/')[1];
-        if (seg && seg.includes('.')) return abs.href;
-      }
-      return WO + '/' + abs.host + abs.pathname + abs.search + abs.hash;
-    } catch(e) { return null; }
-  }
-
-  // Block ad network requests at runtime
-  var originalFetch = window.fetch;
-  window.fetch = function() {
-    var url = arguments[0];
-    if (typeof url === 'string' && isAdUrl(url)) {
-      return Promise.reject(new Error('Ad blocked'));
-    }
-    return originalFetch.apply(this, arguments);
-  };
-
-  var originalXHR = window.XMLHttpRequest.prototype.open;
-  window.XMLHttpRequest.prototype.open = function(method, url) {
-    if (isAdUrl(url)) return;
-    return originalXHR.apply(this, arguments);
-  };
-
-  function isAdUrl(url) {
-    var adPatterns = [
-      'googlesyndication', 'doubleclick', 'googleadservices',
-      'google-analytics', 'googletagmanager', 'googletagservices',
-      '/ads/', '/ad/', '/advert', 'adsense', 'analytics',
-      'facebook.com/ads', 'twitter.com/ads', 'adnxs.com',
-      'advertising.com', 'outbrain.com', 'taboola.com'
-    ];
-    return adPatterns.some(function(p) { return url.toLowerCase().indexOf(p) > -1; });
-  }
-
-  function removeAds() {
-    var selectors = [
-      'iframe[src*="googlesyndication"]', 'iframe[src*="doubleclick"]',
-      'iframe[src*="google-analytics"]', 'div[id*="google_ads"]',
-      'div[class*="adsbygoogle"]', 'ins.adsbygoogle',
-      '[data-ad-slot]', '[data-ad-client]',
-      '.a-div-horizontal', '.a-div-vertical', '.a-div-placeholder', '.a-div-box'
-    ];
-    selectors.forEach(function(sel) {
-      document.querySelectorAll(sel).forEach(function(el) {
-        el.style.display = 'none';
-        try { el.remove(); } catch(e) {}
-      });
-    });
-  }
-
-  removeAds();
-  setInterval(removeAds, 200);
-
-  var observer = new MutationObserver(removeAds);
-  function startObserver() {
-    if (document.body) {
-      observer.observe(document.body, { childList: true, subtree: true });
-    } else {
-      setTimeout(startObserver, 10);
-    }
-  }
-  startObserver();
-
-  // 🔒 LOCK DOWN NAVIGATION - keep everything in proxy
-  document.addEventListener('click', function(e) {
-    var el = e.target;
-    while (el && el !== document) {
-      if (el.tagName === 'A') break;
-      el = el.parentElement || el.parentNode;
-    }
-    if (!el || el.tagName !== 'A') return;
-    var href = el.getAttribute('href');
-    if (!href) return;
-    var p = toProxy(href);
-    if (!p) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (el.target === '_blank' || e.metaKey || e.ctrlKey) {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
-      } else {
-        window.open(p, '_blank');
-      }
-    } else {
-      if (window.parent && window.parent !== window) {
-        window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
-      } else {
-        location.href = p;
-      }
-    }
-  }, true);
-
-  document.addEventListener('submit', function(e) {
-    var f = e.target;
-    if (f && f.tagName === 'FORM') {
-      var action = f.getAttribute('action') || '';
-      var p = toProxy(action);
-      if (p) f.setAttribute('action', p);
-    }
-  }, true);
-
-  // Patch location.href
-  try {
-    var lp = Object.getPrototypeOf(location);
-    var od = Object.getOwnPropertyDescriptor(lp, 'href');
-    if (od && od.set) {
-      Object.defineProperty(lp, 'href', {
-        get: od.get,
-        set: function(v) {
-          var p = toProxy(v);
-          if (p) {
-            if (window.parent && window.parent !== window) {
-              window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
-            } else {
-              od.set.call(this, p);
-            }
-          }
-        },
-        configurable: true, enumerable: true
-      });
-    }
-  } catch(e) {}
-
-  // Patch window.open
-  var origOpen = window.open;
-  window.open = function(u, n, f) {
-    if (u) {
-      var p = toProxy(u);
-      if (p) {
-        if (window.parent && window.parent !== window) {
-          window.parent.postMessage({type: 'LOAD_URL', url: p}, '*');
-          return null;
-        }
-        u = p;
-      }
-    }
-    return origOpen.call(window, u, n, f);
-  };
-
-  // Patch history
-  var op = history.pushState, or = history.replaceState;
-  history.pushState = function(s, t, u) {
-    if (u) { var p = toProxy(u); if (p) u = p; }
-    return op.call(history, s, t, u);
-  };
-  history.replaceState = function(s, t, u) {
-    if (u) { var p = toProxy(u); if (p) u = p; }
-    return or.call(history, s, t, u);
-  };
-
-  // Intercept fullscreen requests
-  window.addEventListener('message', function(event) {
-    if (event.data && event.data.type === 'REQUEST_FULLSCREEN') {
-      var wrapper = document.querySelector('#gameWrapper') || document.documentElement;
-      if (wrapper.requestFullscreen) wrapper.requestFullscreen();
-      else if (wrapper.webkitRequestFullscreen) wrapper.webkitRequestFullscreen();
-    }
-  });
-
-  console.log("[HyperZ Proxy] Initialized with ad blocking and nav lockdown");
-})();
-</script>`;
 }
 
 function getMainHTML() {
@@ -539,14 +564,14 @@ function getMainHTML() {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Home - Classroom</title>
-    <meta name="description" content="Google Classroom">
+    <meta name="description" content="Play Roblox, Fortnite, Call of Duty Mobile, Delta Force, and more in your browser">
     
     <!-- PWA Meta Tags -->
     <meta name="theme-color" content="#2d2d2d">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Classroom">
+    <meta name="apple-mobile-web-app-title" content="CloudMoon">
     <link rel="manifest" href="/manifest.json">
     <link rel="apple-touch-icon" href="/favicon.png">
     
@@ -579,42 +604,18 @@ function getMainHTML() {
             background: white;
             position: relative;
         }
-
-        /* URL bar */
-        #url-bar {
-            position: fixed;
-            top: 10px;
-            left: 50%;
-            transform: translateX(-50%);
-            z-index: 999999;
-            display: flex;
-            gap: 5px;
-            background: rgba(22, 27, 34, 0.95);
-            padding: 5px;
-            border-radius: 25px;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255,255,255,0.1);
-        }
-        #url-input {
-            background: transparent;
+        
+        iframe {
+            width: 100%;
+            height: 100%;
             border: none;
+            background: white;
             outline: none;
-            color: white;
-            padding: 8px 15px;
-            font-size: 14px;
-            width: 300px;
-            border-radius: 20px;
         }
-        #url-go {
-            background: #58a6ff;
-            color: white;
-            border: none;
-            padding: 8px 20px;
-            border-radius: 20px;
-            cursor: pointer;
-            font-weight: 600;
+        
+        iframe:focus {
+            outline: none;
         }
-        #url-go:hover { background: #4293e6; }
 
         /* Floating button dock — bottom left */
         #btn-dock {
@@ -668,12 +669,6 @@ function getMainHTML() {
         <div id="frame-container"></div>
     </div>
 
-    <!-- URL Bar -->
-    <div id="url-bar">
-        <input type="text" id="url-input" placeholder="Enter URL (e.g. example.com)" autocomplete="off" />
-        <button id="url-go">Go</button>
-    </div>
-
     <!-- Floating bottom-left controls -->
     <div id="btn-dock">
         <button class="dock-btn" id="home-btn" onclick="goBack()" title="Home">
@@ -689,30 +684,26 @@ function getMainHTML() {
     </div>
 
     <script>
-        var frameContainer = document.getElementById('frame-container');
-        var homeBtn = document.getElementById('home-btn');
-        var btnDock = document.getElementById('btn-dock');
-        var urlInput = document.getElementById('url-input');
-        var urlGo = document.getElementById('url-go');
+        const frameContainer = document.getElementById('frame-container');
+        const homeBtn = document.getElementById('home-btn');
+        const btnDock = document.getElementById('btn-dock');
         
-        var isShowingGame = false;
-        var mainURL = '/web.cloudmoonapp.com/';
-        var shadowRoots = [];
-        var currentIframe = null;
-        var workerOrigin = window.location.origin;
+        let isShowingGame = false;
+        let mainURL = '/web.cloudmoonapp.com/';
+        let shadowRoots = [];
+        let currentIframe = null;
         
-        var SANDBOX_HOME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
-        var SANDBOX_GAME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
-        var ALLOW_PERMISSIONS = 'accelerometer; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; clipboard-read; clipboard-write; xr-spatial-tracking; gamepad; fullscreen; picture-in-picture';
+        const SANDBOX_HOME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
+        const SANDBOX_GAME = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
+        const ALLOW_PERMISSIONS = 'accelerometer; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; clipboard-read; clipboard-write; xr-spatial-tracking; gamepad';
         
-        var SHADOW_LAYERS = 4;
+        const SHADOW_LAYERS = 4;
         
-        function createMultiLayerShadowFrame(url, isGame) {
-            if (isGame === undefined) isGame = false;
+        function createMultiLayerShadowFrame(url, isGame = false) {
             frameContainer.innerHTML = '';
             shadowRoots = [];
             
-            var currentHost = document.createElement('div');
+            let currentHost = document.createElement('div');
             currentHost.style.width = '100%';
             currentHost.style.height = '100%';
             currentHost.style.margin = '0';
@@ -725,12 +716,12 @@ function getMainHTML() {
             
             frameContainer.appendChild(currentHost);
             
-            for (var i = 0; i < SHADOW_LAYERS; i++) {
-                var shadowRoot = currentHost.attachShadow({ mode: 'closed' });
+            for (let i = 0; i < SHADOW_LAYERS; i++) {
+                const shadowRoot = currentHost.attachShadow({ mode: 'closed' });
                 shadowRoots.push(shadowRoot);
                 
                 if (i < SHADOW_LAYERS - 1) {
-                    var nextHost = document.createElement('div');
+                    const nextHost = document.createElement('div');
                     nextHost.style.width = '100%';
                     nextHost.style.height = '100%';
                     nextHost.style.margin = '0';
@@ -744,9 +735,9 @@ function getMainHTML() {
                     shadowRoot.appendChild(nextHost);
                     currentHost = nextHost;
                     
-                    console.log('%c Shadow Layer ' + (i + 1) + ' created', 'color: #667eea; font-weight: bold;');
+                    console.log(\`%c Shadow Layer \${i + 1} created\`, 'color: #667eea; font-weight: bold;');
                 } else {
-                    var iframe = document.createElement('iframe');
+                    const iframe = document.createElement('iframe');
                     iframe.style.width = '100%';
                     iframe.style.height = '100%';
                     iframe.style.border = 'none';
@@ -755,10 +746,10 @@ function getMainHTML() {
                     iframe.style.display = 'block';
                     iframe.style.overflow = 'hidden';
                     
-                    var sandboxAttr = isGame ? SANDBOX_GAME : SANDBOX_HOME;
+                    const sandboxAttr = isGame ? SANDBOX_GAME : SANDBOX_HOME;
                     iframe.setAttribute('sandbox', sandboxAttr);
                     iframe.setAttribute('allow', ALLOW_PERMISSIONS);
-                    iframe.setAttribute('title', isGame ? 'Game Preview' : 'Proxy Preview');
+                    iframe.setAttribute('title', isGame ? 'Game Preview' : 'CloudMoon Preview');
                     iframe.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
                     iframe.setAttribute('importance', 'high');
                     iframe.setAttribute('loading', 'eager');
@@ -770,31 +761,31 @@ function getMainHTML() {
                     shadowRoot.appendChild(iframe);
                     currentIframe = iframe;
                     
-                    iframe.addEventListener('load', function() {
+                    iframe.addEventListener('load', () => {
                         focusIframe();
                     });
                     
-                    iframe.addEventListener('error', function(e) {
+                    iframe.addEventListener('error', (e) => {
                         console.error('Iframe error:', e);
                     });
                     
-                    console.log('%c Final Shadow Layer ' + SHADOW_LAYERS + ' with iframe created', 'color: #10b981; font-weight: bold;');
+                    console.log(\`%c Final Shadow Layer \${SHADOW_LAYERS} with iframe created\`, 'color: #10b981; font-weight: bold;');
                 }
             }
             
-            console.log('%c ' + SHADOW_LAYERS + '-Layer Shadow DOM Protection Active', 'color: #667eea; font-size: 14px; font-weight: bold;');
+            console.log(\`%c \${SHADOW_LAYERS}-Layer Shadow DOM Protection Active\`, 'color: #667eea; font-size: 14px; font-weight: bold;');
         }
         
         function generateRandomId() {
             return 'x' + Math.random().toString(36).substr(2, 9) + Date.now().toString(36);
         }
         
-        function createShadowFrame(url, isGame) {
+        function createShadowFrame(url, isGame = false) {
             createMultiLayerShadowFrame(url, isGame);
         }
         
         function focusIframe() {
-            setTimeout(function() {
+            setTimeout(() => {
                 if (currentIframe) {
                     currentIframe.focus();
                     try {
@@ -809,62 +800,40 @@ function getMainHTML() {
         // Initialize with multi-layer shadow DOM
         createMultiLayerShadowFrame(mainURL, false);
         
-        document.addEventListener('click', function(e) {
+        document.addEventListener('click', (e) => {
             if (currentIframe && e.target !== currentIframe) {
                 focusIframe();
             }
         });
         
-        // Listen for navigation messages from iframe
-        window.addEventListener('message', function(event) {
-            if (event.data && event.data.type === 'LOAD_URL') {
-                var targetUrl = event.data.url;
-                console.log('Loading URL in proxy:', targetUrl);
-                loadUrl(targetUrl);
-            }
+        window.addEventListener('message', (event) => {
             if (event.data && event.data.type === 'LOAD_GAME') {
-                var gameUrl = event.data.url;
+                const gameUrl = event.data.url;
                 console.log('Game URL received:', gameUrl);
                 loadGame(gameUrl);
             }
         });
         
-        function loadUrl(url) {
-            if (!url) return;
-            // If it's already a proxied URL (starts with worker origin), use as-is
-            if (url.startsWith(workerOrigin + '/')) {
-                createMultiLayerShadowFrame(url, false);
-                homeBtn.style.display = 'flex';
-                return;
-            }
-            // Otherwise, convert to proxied URL
-            try {
-                var u = new URL(url);
-                var proxyUrl = workerOrigin + '/' + u.host + u.pathname + u.search;
-                createMultiLayerShadowFrame(proxyUrl, false);
-                homeBtn.style.display = 'flex';
-                urlInput.value = u.host + u.pathname;
-            } catch(e) {
-                console.error('Invalid URL:', url);
-            }
-        }
-        
         function loadGame(url) {
-            var fixedURL = url;
+            let fixedURL = url;
+            const workerDomain = window.location.origin;
             
             // Check if URL is already on our worker domain
-            if (url.includes(workerOrigin)) {
+            if (url.includes(workerDomain)) {
+                // Already on our domain, use as-is (avoid double-proxying)
                 fixedURL = url;
                 console.log('Game URL already on worker domain, using directly');
             } else if (url.includes('://')) {
-                fixedURL = workerOrigin + '/' + new URL(url).host + new URL(url).pathname + new URL(url).search;
+                // External URL - proxy it through worker
+                fixedURL = workerDomain + '/proxy/' + encodeURIComponent(url);
                 console.log('External game URL, proxying through worker');
             } else if (url.startsWith('/')) {
+                // Relative URL - keep it (will be proxied automatically)
                 fixedURL = url;
                 console.log('Relative game URL, using as-is');
             }
             
-            console.log('%c Loading game with ' + SHADOW_LAYERS + '-layer Shadow DOM protection', 'color: #667eea; font-weight: bold;');
+            console.log(\`%c Loading game with \${SHADOW_LAYERS}-layer Shadow DOM protection\`, 'color: #667eea; font-weight: bold;');
             console.log('Final game URL:', fixedURL);
             
             createMultiLayerShadowFrame(fixedURL, true);
@@ -877,7 +846,6 @@ function getMainHTML() {
             createMultiLayerShadowFrame(mainURL, false);
             isShowingGame = false;
             homeBtn.style.display = 'none';
-            urlInput.value = '';
 
             // Exit fullscreen if active
             if (document.fullscreenElement) {
@@ -886,80 +854,64 @@ function getMainHTML() {
         }
 
         function enterFullscreen() {
+            // Try to send message to iframe to fullscreen the game container
             if (currentIframe) {
                 try {
+                    // Send message through all shadow layers to reach the iframe
                     currentIframe.contentWindow.postMessage({type: 'REQUEST_FULLSCREEN'}, '*');
                     console.log('Sent fullscreen request to game container');
                 } catch (e) {
                     console.log('Cannot send message to iframe (cross-origin), using fallback');
+                    // Fallback to document fullscreen
                     document.documentElement.requestFullscreen();
                 }
             } else {
+                // No iframe, use document fullscreen
                 document.documentElement.requestFullscreen();
             }
+            // Hide the dock while fullscreen
             btnDock.classList.add('hidden');
         }
 
-        document.addEventListener('fullscreenchange', function() {
+        document.addEventListener('fullscreenchange', () => {
             if (!document.fullscreenElement) {
+                // Restore dock when exiting fullscreen
                 btnDock.classList.remove('hidden');
             }
         });
         
-        // URL bar handlers
-        urlGo.addEventListener('click', function() {
-            var val = urlInput.value.trim();
-            if (!val) return;
-            // Auto-add https:// if no protocol
-            if (!val.startsWith('http://') && !val.startsWith('https://')) {
-                val = 'https://' + val;
-            }
-            loadUrl(val);
-        });
-        
-        urlInput.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                var val = urlInput.value.trim();
-                if (!val) return;
-                if (!val.startsWith('http://') && !val.startsWith('https://')) {
-                    val = 'https://' + val;
-                }
-                loadUrl(val);
-            }
-        });
-        
-        console.log('%c HyperZ Universal Proxy Active', 'color: #667eea; font-size: 18px; font-weight: bold;');
-        console.log('%c Multi-Layer Shadow DOM Protection: ' + SHADOW_LAYERS + ' Layers', 'color: #10b981; font-size: 14px; font-weight: bold;');
+        console.log('%c CloudMoon Proxy Active with Ad Blocking', 'color: #667eea; font-size: 18px; font-weight: bold;');
+        console.log(\`%c Multi-Layer Shadow DOM Protection: \${SHADOW_LAYERS} Layers\`, 'color: #10b981; font-size: 14px; font-weight: bold;');
         
         // Register Service Worker for PWA
         if ('serviceWorker' in navigator) {
-            window.addEventListener('load', function() {
+            window.addEventListener('load', () => {
                 navigator.serviceWorker.register('/sw.js')
-                    .then(function(registration) {
+                    .then((registration) => {
                         console.log('%c PWA Service Worker registered', 'color: #667eea; font-weight: bold;');
                         
-                        registration.addEventListener('updatefound', function() {
-                            var newWorker = registration.installing;
-                            newWorker.addEventListener('statechange', function() {
+                        registration.addEventListener('updatefound', () => {
+                            const newWorker = registration.installing;
+                            newWorker.addEventListener('statechange', () => {
                                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
                                     console.log('%c New version available!', 'color: #10b981; font-weight: bold;');
                                 }
                             });
                         });
                     })
-                    .catch(function(error) {
+                    .catch((error) => {
                         console.log('Service Worker registration failed:', error);
                     });
             });
         }
         
-        var deferredPrompt;
-        window.addEventListener('beforeinstallprompt', function(e) {
+        let deferredPrompt;
+        window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
             deferredPrompt = e;
         });
         
-        window.addEventListener('appinstalled', function() {
+        window.addEventListener('appinstalled', () => {
             deferredPrompt = null;
         });
     </script>
@@ -1007,14 +959,15 @@ function getManifest() {
 }
 
 function getServiceWorker() {
-  return `// HyperZ Proxy Service Worker
-const CACHE_NAME = 'hyperz-proxy-v1';
-const RUNTIME_CACHE = 'hyperz-runtime';
+  return `// CloudMoon InPlay Service Worker
+const CACHE_NAME = 'cloudmoon-v1';
+const RUNTIME_CACHE = 'cloudmoon-runtime';
 
-self.addEventListener('install', function(event) {
+// Install event - cache essential resources
+self.addEventListener('install', (event) => {
   console.log('[ServiceWorker] Install');
   event.waitUntil(
-    caches.open(CACHE_NAME).then(function(cache) {
+    caches.open(CACHE_NAME).then((cache) => {
       console.log('[ServiceWorker] Caching app shell');
       return cache.addAll([
         '/',
@@ -1022,57 +975,64 @@ self.addEventListener('install', function(event) {
         '/sw.js',
         '/favicon.png'
       ]);
-    }).then(function() {
+    }).then(() => {
       return self.skipWaiting();
     })
   );
 });
 
-self.addEventListener('activate', function(event) {
+// Activate event - clean up old caches
+self.addEventListener('activate', (event) => {
   console.log('[ServiceWorker] Activate');
   event.waitUntil(
-    caches.keys().then(function(cacheNames) {
+    caches.keys().then((cacheNames) => {
       return Promise.all(
-        cacheNames.map(function(cacheName) {
+        cacheNames.map((cacheName) => {
           if (cacheName !== CACHE_NAME && cacheName !== RUNTIME_CACHE) {
             console.log('[ServiceWorker] Removing old cache', cacheName);
             return caches.delete(cacheName);
           }
         })
       );
-    }).then(function() {
+    }).then(() => {
       return self.clients.claim();
     })
   );
 });
 
-self.addEventListener('fetch', function(event) {
+// Fetch event - network first, fallback to cache
+self.addEventListener('fetch', (event) => {
+  // Skip cross-origin requests - let browser handle them
   if (!event.request.url.startsWith(self.location.origin)) {
     return;
   }
 
   event.respondWith(
     fetch(event.request)
-      .then(function(response) {
+      .then((response) => {
+        // If response is valid, clone it and cache it
         if (response && response.status === 200) {
-          var responseToCache = response.clone();
-          caches.open(RUNTIME_CACHE).then(function(cache) {
+          const responseToCache = response.clone();
+          caches.open(RUNTIME_CACHE).then((cache) => {
             cache.put(event.request, responseToCache);
-          }).catch(function(error) {
+          }).catch((error) => {
             console.error('[ServiceWorker] Cache put error:', error);
           });
         }
         return response;
       })
-      .catch(function(error) {
+      .catch((error) => {
         console.log('[ServiceWorker] Fetch failed, trying cache:', event.request.url);
-        return caches.match(event.request).then(function(response) {
+        // If network fails, try to serve from cache
+        return caches.match(event.request).then((response) => {
           if (response) {
             return response;
           }
+          // If not in cache, return a basic offline page for navigation
           if (event.request.mode === 'navigate') {
             return caches.match('/');
           }
+          // For other resources, return a minimal response to prevent errors
           return new Response('', { 
             status: 200, 
             statusText: 'OK',
@@ -1083,7 +1043,8 @@ self.addEventListener('fetch', function(event) {
   );
 });
 
-self.addEventListener('message', function(event) {
+// Handle messages from clients
+self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
