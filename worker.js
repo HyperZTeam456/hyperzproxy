@@ -2,7 +2,7 @@ addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
-// Pre-compiled regexes
+// Pre-compiled regexes for performance
 const RE_SCRIPT_AD = /<script[^>]*(?:googlesyndication|adsbygoogle|doubleclick|google-analytics|googletagmanager)[^>]*>[\s\S]*?<\/script>/gi;
 const RE_IFRAME_AD = /<iframe[^>]*(?:googlesyndication|doubleclick|google-analytics)[^>]*>[\s\S]*?<\/iframe>/gi;
 const RE_INS_AD = /<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi;
@@ -25,137 +25,15 @@ const URL_ATTRS = new Set([
 const AD_PATTERNS = [
   'googlesyndication.com', 'doubleclick.net', 'googleadservices.com',
   'google-analytics.com', 'googletagmanager.com', 'googletagservices.com',
-  'adservice.google.com', 'pagead2.googlesyndication.com', 'tpc.googlesyndication.com',
-  'video-ad-stats.googlesyndication.com', 'ads.google.com', 'adssettings.google.com',
-  'static.ads-twitter.com', 'ads-api.twitter.com', 'ads.facebook.com', 'an.facebook.com',
-  'adnxs.com', 'advertising.com', 'outbrain.com', 'taboola.com', 'criteo.com',
-  'pubmatic.com', 'rubiconproject.com', 'openx.net', 'adsafeprotected.com',
-  'moatads.com', 'scorecardresearch.com', '/ads/', '/ad/', '/advert/',
-  '/advertisement/', '/adsense/', '/adserver/', '/analytics/', 'prebid',
-  'advertis', 'banner', 'popup'
+  'adservice.google.com', 'pagead2.googlesyndication.com',
+  'ads.google.com', 'static.ads-twitter.com', 'ads.facebook.com',
+  'adnxs.com', 'advertising.com', 'outbrain.com', 'taboola.com',
+  'criteo.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net',
+  '/ads/', '/ad/', '/advert/', '/analytics/', 'prebid', 'banner'
 ];
 
-function getShellHTML(workerOrigin, targetURL) {
-  const proxySrc = `${workerOrigin}/${targetURL.host}${targetURL.pathname}${targetURL.search}`;
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>${targetURL.host} - HyperZ Proxy</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;background:#fff}
-#proxy-frame{position:fixed;top:0;left:0;width:100vw;height:100vh;border:none;display:block;z-index:999999}
-</style>
-</head>
-<body>
-<iframe id="proxy-frame" src="${proxySrc}" allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad;fullscreen;picture-in-picture" referrerpolicy="no-referrer-when-downgrade"></iframe>
-<script>
-(function(){
-  var WO = "${workerOrigin}";
-  var BH = "${targetURL.host}";
-  var frame = document.getElementById('proxy-frame');
-  var lastValidSrc = frame.src;
-
-  function isValidProxyUrl(url) {
-    try {
-      var u = new URL(url);
-      if (u.origin !== WO) return false;
-      var seg = u.pathname.split('/')[1];
-      if (!seg || !seg.includes('.')) return false;
-      return true;
-    } catch(e) { return false; }
-  }
-
-  function toProxy(url) {
-    try {
-      var u = new URL(url, WO + '/' + BH + '/');
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-      if (u.origin === WO) {
-        var seg = u.pathname.split('/')[1];
-        if (seg && seg.includes('.')) return u.href;
-      }
-      return WO + '/' + u.host + u.pathname + u.search + u.hash;
-    } catch(e) { return null; }
-  }
-
-  setInterval(function() {
-    try {
-      var currentSrc = frame.src;
-      if (currentSrc !== lastValidSrc) {
-        if (!isValidProxyUrl(currentSrc)) {
-          var fixed = toProxy(currentSrc);
-          if (fixed && isValidProxyUrl(fixed)) {
-            frame.src = fixed;
-            lastValidSrc = fixed;
-          } else {
-            frame.src = lastValidSrc;
-          }
-        } else {
-          lastValidSrc = currentSrc;
-        }
-      }
-    } catch(e) {
-      frame.src = lastValidSrc;
-    }
-  }, 50);
-
-  frame.addEventListener('load', function() {
-    try {
-      var currentSrc = frame.src;
-      if (!isValidProxyUrl(currentSrc)) {
-        var fixed = toProxy(currentSrc);
-        if (fixed && isValidProxyUrl(fixed)) {
-          frame.src = fixed;
-          lastValidSrc = fixed;
-        } else {
-          frame.src = lastValidSrc;
-        }
-      } else {
-        lastValidSrc = currentSrc;
-      }
-    } catch(e) {
-      frame.src = lastValidSrc;
-    }
-  });
-
-  window.addEventListener('message', function(e) {
-    if (e.data && typeof e.data === 'object') {
-      if (e.data.type === 'navigate' || e.data.type === 'redirect' || e.data.url) {
-        e.stopPropagation();
-      }
-    }
-  }, true);
-
-  window.open = function(u, n, f) {
-    var p = toProxy(u);
-    if (p && isValidProxyUrl(p)) {
-      frame.src = p;
-      lastValidSrc = p;
-      return null;
-    }
-    return null;
-  };
-
-  try {
-    var lp = Object.getPrototypeOf(location);
-    var od = Object.getOwnPropertyDescriptor(lp, 'href');
-    if (od && od.set) {
-      Object.defineProperty(lp, 'href', {
-        get: od.get,
-        set: function(v) {},
-        configurable: true, enumerable: true
-      });
-    }
-  } catch(e) {}
-})();
-</script>
-</body>
-</html>`;
-}
-
-const INNER_REWRITER = `<script id="__inner_proxy_rewriter__">
+// Comprehensive navigation interceptor
+const NAV_INTERCEPTOR = `<script id="__proxy_nav__">
 (function(){
   var WO = "WORKER_ORIGIN_PLACEHOLDER";
   var BO = "BASE_ORIGIN_PLACEHOLDER";
@@ -167,68 +45,149 @@ const INNER_REWRITER = `<script id="__inner_proxy_rewriter__">
     if (/^(data:|blob:|mailto:|tel:|#|javascript:|about:)/i.test(t)) return null;
     try {
       var abs;
-      if (/^(https?:)?\/\//i.test(t)) abs = new URL(t, BO + '/');
-      else abs = new URL(t, location.href);
+      if (/^(https?:)?\/\//i.test(t)) {
+        abs = new URL(t, BO + '/');
+      } else {
+        abs = new URL(t, location.href);
+      }
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
       if (abs.origin === WO) {
         var seg = abs.pathname.split('/')[1];
         if (seg && seg.includes('.')) return abs.href;
       }
-      var p = WO + '/' + abs.host + abs.pathname + abs.search + abs.hash;
-      if (!p.startsWith(WO + '/')) return null;
-      return p;
+      return WO + '/' + abs.host + abs.pathname + abs.search + abs.hash;
     } catch(e) { return null; }
   }
 
+  // Rewrite all links immediately and on load
   function rewriteAll() {
-    document.querySelectorAll('a[href],[data-href],[data-link],[data-redirect]').forEach(function(el) {
-      ['href','data-href','data-link','data-redirect'].forEach(function(a){
-        var v=el.getAttribute(a);if(v){var p=toProxy(v);if(p)el.setAttribute(a,p);else if(a==='href')el.removeAttribute('href');}
+    document.querySelectorAll('a[href],[data-href],[data-link]').forEach(function(el) {
+      ['href','data-href','data-link'].forEach(function(a){
+        var v = el.getAttribute(a);
+        if (v) { var p = toProxy(v); if (p) el.setAttribute(a, p); }
       });
     });
     document.querySelectorAll('form[action]').forEach(function(el) {
-      var v=el.getAttribute('action');if(v){var p=toProxy(v);if(p)el.setAttribute('action',p);}
+      var v = el.getAttribute('action');
+      if (v) { var p = toProxy(v); if (p) el.setAttribute('action', p); }
     });
   }
 
   rewriteAll();
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',rewriteAll);
-  window.addEventListener('load',rewriteAll);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', rewriteAll);
+  }
+  window.addEventListener('load', rewriteAll);
 
-  document.addEventListener('click',function(e){
-    var el=e.target;while(el&&el!==document){if(el.tagName==='A')break;el=el.parentElement||el.parentNode;}
-    if(!el||el.tagName!=='A')return;
-    var href=el.getAttribute('href')||el.getAttribute('data-href')||el.getAttribute('data-link');
-    if(!href)return;var p=toProxy(href);
-    if(!p){e.preventDefault();e.stopImmediatePropagation();return;}
-    el.setAttribute('href',p);e.preventDefault();e.stopImmediatePropagation();
-    if(el.target==='_blank'||e.metaKey||e.ctrlKey){window.open(p,'_blank');}
-    else{history.pushState(null,'',p);window.dispatchEvent(new PopStateEvent('popstate'));}
-  },true);
+  // Capture clicks
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el !== document) {
+      if (el.tagName === 'A') break;
+      el = el.parentElement || el.parentNode;
+    }
+    if (!el || el.tagName !== 'A') return;
+    var href = el.getAttribute('href') || el.getAttribute('data-href');
+    if (!href) return;
+    var p = toProxy(href);
+    if (!p) return;
+    el.setAttribute('href', p);
+    e.preventDefault();
+    e.stopPropagation();
+    if (el.target === '_blank' || e.metaKey || e.ctrlKey) {
+      window.open(p, '_blank');
+    } else {
+      location.href = p;
+    }
+  }, true);
 
-  document.addEventListener('submit',function(e){
-    var f=e.target;if(f&&f.tagName==='FORM'){var v=f.getAttribute('action')||'';var p=toProxy(v);
-    if(!p){e.preventDefault();e.stopImmediatePropagation();return;}f.setAttribute('action',p);}
-  },true);
+  // Intercept forms
+  document.addEventListener('submit', function(e) {
+    var f = e.target;
+    if (f && f.tagName === 'FORM') {
+      var v = f.getAttribute('action') || '';
+      var p = toProxy(v);
+      if (p) f.setAttribute('action', p);
+    }
+  }, true);
 
-  try{var lp=Object.getPrototypeOf(location);var od=Object.getOwnPropertyDescriptor(lp,'href');
-  if(od&&od.set){Object.defineProperty(lp,'href',{get:od.get,set:function(v){var p=toProxy(v);if(!p)return;od.set.call(this,p);},configurable:true,enumerable:true});}}catch(e){}
+  // Patch location.href
+  try {
+    var lp = Object.getPrototypeOf(location);
+    var od = Object.getOwnPropertyDescriptor(lp, 'href');
+    if (od && od.set) {
+      Object.defineProperty(lp, 'href', {
+        get: od.get,
+        set: function(v) { var p = toProxy(v); od.set.call(this, p || v); },
+        configurable: true, enumerable: true
+      });
+    }
+  } catch(e) {}
 
-  var oo=window.open;window.open=function(u,n,f){if(u){var p=toProxy(u);if(!p)return null;u=p;}return oo.call(window,u,n,f);};
-  var op=history.pushState,or=history.replaceState;
-  history.pushState=function(s,t,u){if(u){var p=toProxy(u);if(!p)return;u=p;}return op.call(history,s,t,u);};
-  history.replaceState=function(s,t,u){if(u){var p=toProxy(u);if(!p)return;u=p;}return or.call(history,s,t,u);};
+  // Patch window.open
+  var oo = window.open;
+  window.open = function(u, n, f) {
+    if (u) { var p = toProxy(u); if (p) u = p; }
+    return oo.call(window, u, n, f);
+  };
 
-  var mo=new MutationObserver(function(muts){muts.forEach(function(m){
-    if(m.type==='childList'){m.addedNodes.forEach(function(n){if(n.nodeType!==1)return;
-    if(n.tagName==='A'){['href','data-href','data-link','data-redirect'].forEach(function(a){var v=n.getAttribute(a);if(v){var p=toProxy(v);if(p)n.setAttribute(a,p);else if(a==='href')n.removeAttribute('href');}});}
-    if(n.querySelectorAll){n.querySelectorAll('a[href],[data-href],[data-link]').forEach(function(el){['href','data-href','data-link','data-redirect'].forEach(function(a){var v=el.getAttribute(a);if(v){var p=toProxy(v);if(p)el.setAttribute(a,p);else if(a==='href')el.removeAttribute('href');}});}}
-    });}
-    if(m.type==='attributes'){var el=m.target,a=m.attributeName;
-    if(['href','action','src','data-href','data-link','data-redirect'].indexOf(a)>-1&&el.nodeType===1){var v=el.getAttribute(a);var p=toProxy(v);if(p)el.setAttribute(a,p);else if(a==='href')el.removeAttribute('href');}}
-  });});
-  function startMo(){if(document.documentElement)mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['href','action','src','data-href','data-link','data-redirect']});else setTimeout(startMo,10);}
-  startMo();
+  // Patch history
+  var op = history.pushState, or = history.replaceState;
+  history.pushState = function(s, t, u) {
+    if (u) { var p = toProxy(u); if (p) u = p; }
+    return op.call(history, s, t, u);
+  };
+  history.replaceState = function(s, t, u) {
+    if (u) { var p = toProxy(u); if (p) u = p; }
+    return or.call(history, s, t, u);
+  };
+
+  // Patch fetch/XHR
+  var of = window.fetch;
+  window.fetch = function(i, init) {
+    if (typeof i === 'string') { var p = toProxy(i); if (p) i = p; }
+    else if (i instanceof Request) { var p = toProxy(i.url); if (p) i = new Request(p, i); }
+    return of.call(window, i, init);
+  };
+
+  var ox = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(m, u) {
+    var p = toProxy(u);
+    if (p) arguments[1] = p;
+    return ox.apply(this, arguments);
+  };
+
+  // Watch for dynamic links
+  var mo = new MutationObserver(function(muts) {
+    muts.forEach(function(m) {
+      if (m.type === 'childList') {
+        m.addedNodes.forEach(function(n) {
+          if (n.nodeType !== 1) return;
+          if (n.tagName === 'A') {
+            ['href','data-href','data-link'].forEach(function(a){
+              var v = n.getAttribute(a);
+              if (v) { var p = toProxy(v); if (p) n.setAttribute(a, p); }
+            });
+          }
+          if (n.querySelectorAll) {
+            n.querySelectorAll('a[href],[data-href]').forEach(function(el) {
+              ['href','data-href','data-link'].forEach(function(a){
+                var v = el.getAttribute(a);
+                if (v) { var p = toProxy(v); if (p) el.setAttribute(a, p); }
+              });
+            });
+          }
+        });
+      }
+    });
+  });
+
+  if (document.documentElement) {
+    mo.observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['href', 'action', 'data-href', 'data-link']
+    });
+  }
 })();
 </script>`;
 
@@ -240,16 +199,22 @@ async function handleRequest(request) {
 
   let targetPath = url.pathname.substring(1);
   if (!targetPath) {
-    return new Response('No target specified. Use: /example.com', {
-      status: 400, headers: { 'Content-Type': 'text/plain' }
+    return new Response('Usage: /example.com or /https://example.com', {
+      status: 200, headers: { 'Content-Type': 'text/plain' }
     });
   }
 
+  // ✅ AUTO-APPLY HTTPS: Always use https unless explicitly http://
   let targetURL;
   try {
-    targetURL = (targetPath.startsWith('http://') || targetPath.startsWith('https://'))
-      ? new URL(targetPath)
-      : new URL('https://' + targetPath);
+    if (targetPath.startsWith('http://')) {
+      targetURL = new URL(targetPath);
+    } else if (targetPath.startsWith('https://')) {
+      targetURL = new URL(targetPath);
+    } else {
+      // Default to HTTPS
+      targetURL = new URL('https://' + targetPath);
+    }
   } catch (e) {
     return new Response(`Invalid URL: ${targetPath}`, { status: 400 });
   }
@@ -257,47 +222,67 @@ async function handleRequest(request) {
 
   if (isAdRequest(targetURL.href)) return new Response('', { status: 204 });
 
-  // ✅ FIXED SHELL DETECTION: Only serve shell for TRUE top-level navigations
-  // Must be: navigate mode + accepts HTML + not a subresource + path looks like a domain
-  const accept = request.headers.get('Accept') || '';
-  const secFetchMode = request.headers.get('Sec-Fetch-Mode') || '';
-  const secFetchDest = request.headers.get('Sec-Fetch-Dest') || '';
-  const isNavigate = secFetchMode === 'navigate' || secFetchDest === 'document';
-  const acceptsHtml = accept.includes('text/html');
-  const rejectsNonHtml = !accept.includes('application/json') && !accept.includes('text/css') && !accept.includes('application/javascript') && !accept.includes('image/') && !accept.includes('font/');
-  const firstSeg = targetPath.split('/')[0];
-  const looksLikeDomain = firstSeg && firstSeg.includes('.') && !firstSeg.startsWith('http');
-
-  // Path has file extension? It's a subresource, NOT a page navigation
-  const lastSeg = targetPath.split('/').pop() || '';
-  const hasFileExtension = /\.[a-zA-Z0-9]{2,5}$/.test(lastSeg);
-
-  const shouldServeShell = isNavigate && acceptsHtml && rejectsNonHtml && looksLikeDomain && !hasFileExtension;
-
-  if (shouldServeShell) {
-    const shell = getShellHTML(workerOrigin, targetURL);
-    return new Response(shell, {
-      status: 200,
-      headers: {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Cache-Control': 'no-store'
-      }
-    });
-  }
-
-  // Everything else: proxy raw content (this feeds the iframe)
+  // ✅ COMPREHENSIVE HEADER SPOOFING
   const headers = new Headers(request.headers);
   headers.set('Host', targetURL.host);
   headers.set('Origin', targetURL.origin);
-  headers.set('Referer', targetURL.href);
+  
+  // ✅ FIX: Set referer to the ACTUAL referrer, not the target URL
+  // This prevents referer mismatch that breaks many sites
+  const referer = request.headers.get('Referer');
+  if (referer) {
+    try {
+      const refURL = new URL(referer);
+      // If referer is from our proxy, extract the upstream referer
+      if (refURL.origin === workerOrigin) {
+        const refPath = refURL.pathname.substring(1);
+        const refSeg = refPath.split('/')[0];
+        if (refSeg && refSeg.includes('.')) {
+          headers.set('Referer', 'https://' + refSeg + '/');
+        } else {
+          headers.set('Referer', targetURL.origin + '/');
+        }
+      } else {
+        headers.set('Referer', referer);
+      }
+    } catch(e) {
+      headers.set('Referer', targetURL.origin + '/');
+    }
+  } else {
+    // No referer - set to target origin (looks like direct navigation)
+    headers.set('Referer', targetURL.origin + '/');
+  }
+
+  // ✅ Add proper browser headers that sites expect
+  if (!headers.has('Accept-Language')) {
+    headers.set('Accept-Language', 'en-US,en;q=0.9');
+  }
+  if (!headers.has('Accept-Encoding')) {
+    headers.set('Accept-Encoding', 'gzip, deflate, br');
+  }
+  if (!headers.has('Sec-Fetch-Site')) {
+    headers.set('Sec-Fetch-Site', 'same-origin');
+  }
+  if (!headers.has('Sec-Fetch-Mode')) {
+    headers.set('Sec-Fetch-Mode', 'navigate');
+  }
+  if (!headers.has('Sec-Fetch-Dest')) {
+    headers.set('Sec-Fetch-Dest', 'document');
+  }
+  if (!headers.has('Upgrade-Insecure-Requests')) {
+    headers.set('Upgrade-Insecure-Requests', '1');
+  }
+
+  // Remove Cloudflare-specific headers
   headers.delete('cf-connecting-ip');
   headers.delete('cf-ray');
   headers.delete('x-forwarded-for');
   headers.delete('x-forwarded-proto');
   headers.delete('x-real-ip');
 
-  if (!headers.has('User-Agent')) {
-    headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36');
+  // ✅ Use a more common User-Agent
+  if (!headers.has('User-Agent') || headers.get('User-Agent').includes('Cloudflare')) {
+    headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
   }
 
   let response;
@@ -309,6 +294,7 @@ async function handleRequest(request) {
     return new Response(`Proxy Error: ${err.message}`, { status: 502 });
   }
 
+  // Handle redirects
   if ([301, 302, 303, 307, 308].includes(response.status)) {
     const loc = response.headers.get('Location');
     if (loc) {
@@ -317,12 +303,15 @@ async function handleRequest(request) {
       if (rewritten && rewritten.startsWith(workerOrigin + '/')) {
         return Response.redirect(rewritten, response.status);
       }
-      return new Response('Blocked external redirect', { status: 403 });
+      // For external redirects, follow them but rewrite
+      return Response.redirect(rewriteUrl(loc, targetURL, workerOrigin), response.status);
     }
   }
 
+  // ✅ STRIP ALL SECURITY HEADERS for maximum compatibility
   const respHeaders = new Headers(response.headers);
   respHeaders.delete('Content-Security-Policy');
+  respHeaders.delete('Content-Security-Policy-Report-Only');
   respHeaders.delete('X-Content-Security-Policy');
   respHeaders.delete('X-Frame-Options');
   respHeaders.delete('Frame-Options');
@@ -330,19 +319,27 @@ async function handleRequest(request) {
   respHeaders.delete('Cross-Origin-Opener-Policy');
   respHeaders.delete('Cross-Origin-Embedder-Policy');
   respHeaders.delete('Cross-Origin-Resource-Policy');
+  respHeaders.delete('X-XSS-Protection');
+  respHeaders.delete('X-Content-Type-Options');
+  respHeaders.delete('Referrer-Policy');
+  respHeaders.delete('Permissions-Policy');
   respHeaders.delete('Refresh');
+  
+  // ✅ Allow everything
   respHeaders.set('Access-Control-Allow-Origin', '*');
   respHeaders.set('Access-Control-Allow-Methods', '*');
   respHeaders.set('Access-Control-Allow-Headers', '*');
   respHeaders.set('Access-Control-Allow-Credentials', 'true');
 
+  // ✅ Fix cookies aggressively
   const setCookies = response.headers.getAll('Set-Cookie');
   respHeaders.delete('Set-Cookie');
   for (const cookie of setCookies) {
     let fixed = cookie
       .replace(/Path=([^;]+)/gi, (_, p) => `Path=/${targetURL.host}${p.startsWith('/') ? '' : '/'}${p}`)
       .replace(/Domain=[^;]+;?\s*/gi, '')
-      .replace(/Secure;?\s*/gi, '');
+      .replace(/Secure;?\s*/gi, '')
+      .replace(/HttpOnly;?\s*/gi, '');
     if (!fixed.includes('SameSite=')) fixed += '; SameSite=None';
     respHeaders.append('Set-Cookie', fixed);
   }
@@ -355,14 +352,14 @@ async function handleRequest(request) {
     html = blockAdsInHTML(html);
     html = deepRewriteHtml(html, targetURL, workerOrigin);
 
-    const innerScript = INNER_REWRITER
+    const interceptor = NAV_INTERCEPTOR
       .replace('WORKER_ORIGIN_PLACEHOLDER', workerOrigin)
       .replace('BASE_ORIGIN_PLACEHOLDER', targetURL.origin);
 
     if (html.match(RE_HEAD)) {
-      html = html.replace(RE_HEAD, `$&${innerScript}`);
+      html = html.replace(RE_HEAD, `$&${interceptor}`);
     } else {
-      html = innerScript + html;
+      html = interceptor + html;
     }
 
     return new Response(html, { status: response.status, statusText: response.statusText, headers: respHeaders });
@@ -421,11 +418,13 @@ function blockAdsInHTML(html) {
 function deepRewriteHtml(html, baseUrl, workerOrigin) {
   html = html.replace(RE_HEAD, `<head$1><base href="${baseUrl.origin}/">`);
   html = html.replace(/<meta[^>]*http-equiv\s*=\s*["']refresh["'][^>]*>/gi, '');
+  
   html = html.replace(RE_HTML_TAG, (fullMatch, tagName, attrs) => {
     const rewrittenAttrs = attrs.replace(RE_ATTR, (attrMatch, attrName, dqVal, sqVal, uqVal) => {
       const lowerAttr = attrName.toLowerCase();
       const value = dqVal ?? sqVal ?? uqVal;
       const quote = dqVal !== undefined ? '"' : sqVal !== undefined ? "'" : '';
+      
       if (lowerAttr === 'srcset') {
         const rs = value.split(',').map(entry => {
           const parts = entry.trim().split(/\s+/);
@@ -434,47 +433,70 @@ function deepRewriteHtml(html, baseUrl, workerOrigin) {
         }).join(', ');
         return `${attrName}=${quote}${rs}${quote}`;
       }
+      
       if (URL_ATTRS.has(lowerAttr)) {
         const rw = resolveAndProxy(value, baseUrl, workerOrigin);
         return rw !== null ? `${attrName}=${quote}${rw}${quote}` : attrMatch;
       }
+      
       if (lowerAttr === 'style') return `${attrName}=${quote}${rewriteCssUrls(value, baseUrl, workerOrigin)}${quote}`;
+      
       if (lowerAttr === 'content' && tagName.toLowerCase() === 'meta') {
         if (value.match(/^https?:\/\//i) || value.startsWith('//')) {
           const rw = resolveAndProxy(value, baseUrl, workerOrigin);
           return rw !== null ? `${attrName}=${quote}${rw}${quote}` : attrMatch;
         }
       }
+      
       if (lowerAttr.startsWith('data-') && (value.startsWith('http://') || value.startsWith('https://') || value.startsWith('//'))) {
         const rw = resolveAndProxy(value, baseUrl, workerOrigin);
         return rw !== null ? `${attrName}=${quote}${rw}${quote}` : attrMatch;
       }
+      
       return attrMatch;
     });
     return `<${tagName} ${rewrittenAttrs}>`;
   });
+  
   html = html.replace(/(<style[^>]*>)([\s\S]*?)(<\/style>)/gi, (m, o, c, cl) => o + rewriteCssUrls(c, baseUrl, workerOrigin) + cl);
   html = html.replace(/(<script[^>]*>)([\s\S]*?)(<\/script>)/gi, (m, o, c, cl) => {
-    if (c.includes('http://') || c.includes('https://') || c.includes('"/') || c.includes("'/")) return o + rewriteJsUrls(c, baseUrl, workerOrigin) + cl;
+    if (c.includes('http://') || c.includes('https://') || c.includes('"/') || c.includes("'/")) {
+      return o + rewriteJsUrls(c, baseUrl, workerOrigin) + cl;
+    }
     return m;
   });
+  
   return html;
 }
 
 function rewriteCssUrls(css, baseUrl, workerOrigin) {
-  css = css.replace(RE_CSS_URL, (m, q, u) => { const rw = resolveAndProxy(u.trim(), baseUrl, workerOrigin); return rw !== null ? `url(${q}${rw}${q})` : m; });
-  css = css.replace(RE_CSS_IMPORT, (m, q, u) => { const rw = resolveAndProxy(u, baseUrl, workerOrigin); return rw !== null ? `@import ${q}${rw}${q}` : m; });
+  css = css.replace(RE_CSS_URL, (m, q, u) => {
+    const rw = resolveAndProxy(u.trim(), baseUrl, workerOrigin);
+    return rw !== null ? `url(${q}${rw}${q})` : m;
+  });
+  css = css.replace(RE_CSS_IMPORT, (m, q, u) => {
+    const rw = resolveAndProxy(u, baseUrl, workerOrigin);
+    return rw !== null ? `@import ${q}${rw}${q}` : m;
+  });
   return css;
 }
 
 function rewriteJsUrls(js, baseUrl, workerOrigin) {
-  js = js.replace(RE_JS_HTTP_URL, (m, q, u) => { const rw = resolveAndProxy(u, baseUrl, workerOrigin); return rw !== null ? `${q}${rw}${q}` : m; });
-  js = js.replace(RE_JS_PROTO_REL, (m, q, u) => { const rw = resolveAndProxy(u, baseUrl, workerOrigin); return rw !== null ? `${q}${rw}${q}` : m; });
+  js = js.replace(RE_JS_HTTP_URL, (m, q, u) => {
+    const rw = resolveAndProxy(u, baseUrl, workerOrigin);
+    return rw !== null ? `${q}${rw}${q}` : m;
+  });
+  js = js.replace(RE_JS_PROTO_REL, (m, q, u) => {
+    const rw = resolveAndProxy(u, baseUrl, workerOrigin);
+    return rw !== null ? `${q}${rw}${q}` : m;
+  });
   return js;
 }
 
 function isAdRequest(url) {
   const l = url.toLowerCase();
-  for (let i = 0; i < AD_PATTERNS.length; i++) { if (l.includes(AD_PATTERNS[i])) return true; }
+  for (let i = 0; i < AD_PATTERNS.length; i++) {
+    if (l.includes(AD_PATTERNS[i])) return true;
+  }
   return false;
 }
