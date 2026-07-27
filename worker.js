@@ -116,7 +116,7 @@ async function proxyCloudMoon(request) {
     }
   } else {
     // Direct proxy to CloudMoon
-    targetURL = 'https://web.cloudmoonapp.com' + url.pathname + url.search;
+    targetURL = 'https://now.gg' + url.pathname + url.search;
   }
   
   // Block ad requests
@@ -681,7 +681,7 @@ function getMainHTML() {
         const btnDock = document.getElementById('btn-dock');
         
         let isShowingGame = false;
-        let mainURL = '/web.cloudmoonapp.com/';
+        let mainURL = '/now.gg/';
         let shadowRoots = [];
         let currentIframe = null;
         
