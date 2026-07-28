@@ -254,8 +254,12 @@ export function getCloudMoonShellHTML(workerOrigin) {
 export async function handleCloudMoon(request, routePrefix) {
   const url = new URL(request.url);
 
-  // Serve the shell (button dock + shadow DOM) on the bare route
-  if (url.pathname === routePrefix || url.pathname === routePrefix + '/') {
+  // Serve the shell (button dock + shadow DOM) ONLY on the bare, no-trailing-slash
+  // route. The shell's own iframe points at `routePrefix + '/'`, which must NOT
+  // match this check, or the iframe just loads another copy of the shell forever
+  // (infinite recursion -> white screen). Anything with a trailing slash or
+  // further path/content falls through to the real proxy below.
+  if (url.pathname === routePrefix) {
     return new Response(getCloudMoonShellHTML(url.origin), {
       headers: {
         'Content-Type': 'text/html',
