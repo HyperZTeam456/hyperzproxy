@@ -330,14 +330,66 @@ async function proxyRequest(request, targetURL) {
     });
   }
 
-  removeAds();
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function() { removeAds(); });
+  function stripPopupTargets() {
+    document.querySelectorAll('a[target]').forEach(function(a) {
+      var t = a.getAttribute('target');
+      if (t && t.toLowerCase() !== '_self' && t.toLowerCase() !== '_parent') {
+        a.removeAttribute('target');
+      }
+    });
+    document.querySelectorAll('form[target]').forEach(function(f) {
+      var t = f.getAttribute('target');
+      if (t && t.toLowerCase() !== '_self' && t.toLowerCase() !== '_parent') {
+        f.removeAttribute('target');
+      }
+    });
   }
-  window.addEventListener("load", function() { removeAds(); });
-  setInterval(function() { removeAds(); }, 200);
 
-  var observer = new MutationObserver(function() { removeAds(); });
+  // Redirect any popup/new-window attempt to the current page instead
+  var origOpen = window.open;
+  window.open = function(u, t, f) {
+    if (u) {
+      console.log('[Popup Intercepted -> redirecting current page]', u);
+      window.location.href = u;
+    }
+    return { closed: false, close: function(){}, focus: function(){}, blur: function(){} };
+  };
+
+  // Intercept target="_blank"/"_new" link clicks and navigate current page instead
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el !== document.body && el.tagName !== 'A') {
+      el = el.parentElement;
+    }
+    if (el && el.tagName === 'A') {
+      var target = el.getAttribute('target');
+      var href = el.getAttribute('href') || el.href;
+      if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent' && href) {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[Link Redirect Intercepted -> redirecting current page]', href);
+        window.location.href = href;
+      }
+    }
+  }, true);
+
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    var target = form.getAttribute && form.getAttribute('target');
+    if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent') {
+      form.removeAttribute('target');
+    }
+  }, true);
+
+  removeAds();
+  stripPopupTargets();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function() { removeAds(); stripPopupTargets(); });
+  }
+  window.addEventListener("load", function() { removeAds(); stripPopupTargets(); });
+  setInterval(function() { removeAds(); stripPopupTargets(); }, 200);
+
+  var observer = new MutationObserver(function() { removeAds(); stripPopupTargets(); });
   function startObserver() {
     if (document.body) {
       observer.observe(document.body, {
@@ -353,6 +405,7 @@ async function proxyRequest(request, targetURL) {
   startObserver();
 })();
 </script>`;
+
 
     if (html.includes('</head>')) {
       html = html.replace('</head>', injectionCode + '</head>');
@@ -415,7 +468,7 @@ function getUniversalWrapper(targetURL) {
     <script>
         const targetURL = '${targetURL.replace(/'/g, "\\'")}';
         const SHADOW_LAYERS = 4;
-        const SANDBOX_ATTRS = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock allow-top-navigation-by-user-activation';
+        const SANDBOX_ATTRS = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock';
         const ALLOW_PERMISSIONS = 'accelerometer; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; clipboard-read; clipboard-write; xr-spatial-tracking; gamepad';
 
         function createMultiLayerShadowFrame(url) {
