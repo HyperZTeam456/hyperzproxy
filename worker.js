@@ -1,14 +1,27 @@
-// worker.js - Main Cloudflare Worker entry point
-// Routes web.cloudmoonapp.com to the dedicated native handler (cloudmoon.js),
-// and everything else through the universal reverse proxy.
+// worker.js - Mode dispatcher ONLY. No CloudMoon logic lives here.
+//
+// Why a cookie instead of a URL prefix: your original cloudmoon.js maps EVERY
+// path 1:1 onto web.cloudmoonapp.com (e.g. "/app.js" -> "https://web.cloudmoonapp.com/app.js").
+// That only works if cloudmoon.js owns the ENTIRE path space with no prefix in front of it —
+// the instant you stick a "/web.cloudmoonapp.com" prefix in the URL to route it, every
+// root-relative asset the real site requests (scripts, API calls, etc.) loses that prefix
+// and falls into the wrong handler. A URL-based prefix and "give cloudmoon.js the whole
+// path space unmodified" are mutually exclusive.
+//
+// So: a cookie flips the ENTIRE worker into "CloudMoon mode." While the cookie is set,
+// literally everything goes straight to handleCloudMoonRequest(request), completely
+// unmodified, exactly like when it was the only thing on the worker. No path is reserved,
+// nothing is stripped, nothing is rewritten.
 
-import { handleCloudMoon } from './cloudmoon.js';
+import { handleCloudMoonRequest } from './cloudmoon.js';
 
 addEventListener('fetch', event => {
   event.respondWith(handleRequest(event.request));
 });
 
-const CLOUDMOON_PREFIX = '/web.cloudmoonapp.com';
+const COOKIE_NAME = 'cm_mode';
+const ENTER_PATH = '/web.cloudmoonapp.com';
+const EXIT_PATH = '/__leave-cloudmoon';
 
 const AD_PATTERNS = [
   'googlesyndication.com',
@@ -56,11 +69,47 @@ function isAdRequest(url) {
   return AD_PATTERNS.some(pattern => urlLower.includes(pattern));
 }
 
+function hasCloudMoonCookie(request) {
+  const cookie = request.headers.get('Cookie') || '';
+  return cookie.split(';').some(c => c.trim().startsWith(`${COOKIE_NAME}=1`));
+}
+
 async function handleRequest(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  // Root path
+  // ENTRY: visiting /web.cloudmoonapp.com sets the mode cookie and redirects to "/",
+  // which — now that the cookie is set — goes straight into cloudmoon.js's own root
+  // handler (the shell page), unmodified.
+  if (pathname === ENTER_PATH) {
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location': '/',
+        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=Lax`
+      }
+    });
+  }
+
+  // EXIT: leave CloudMoon mode, go back to the universal proxy.
+  if (pathname === EXIT_PATH) {
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location': '/',
+        'Set-Cookie': `${COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax`
+      }
+    });
+  }
+
+  // If we're in CloudMoon mode, hand off EVERY path unmodified. No stripping,
+  // no rewriting — cloudmoon.js decides everything, exactly like your original script.
+  if (hasCloudMoonCookie(request)) {
+    return handleCloudMoonRequest(request);
+  }
+
+  // --- Otherwise: universal proxy mode ---
+
   if (pathname === '/' || pathname === '') {
     return new Response('url not specified', {
       headers: {
@@ -70,14 +119,12 @@ async function handleRequest(request) {
     });
   }
 
-  // Serve manifest.json for PWA
   if (pathname === '/manifest.json') {
     return new Response(getManifest(), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  // Serve service worker for PWA
   if (pathname === '/sw.js') {
     return new Response(getServiceWorker(), {
       headers: {
@@ -87,23 +134,10 @@ async function handleRequest(request) {
     });
   }
 
-  // CHECK FIRST: is this a web.cloudmoonapp.com request? Delegate to cloudmoon.js entirely.
-  if (pathname === CLOUDMOON_PREFIX || pathname.startsWith(CLOUDMOON_PREFIX + '/')) {
-    return handleCloudMoon(request, CLOUDMOON_PREFIX);
-  }
-
-  // Otherwise: universal proxy mode
   const targetURL = parseUniversalURL(pathname, url.search);
 
   if (!targetURL || !isValidURL(targetURL)) {
     return new Response('Invalid URL', { status: 400 });
-  }
-
-  // Safety net: if someone reaches a cloudmoonapp.com URL through the universal
-  // /proxy/ path instead of the /web.cloudmoonapp.com prefix, still hand it to
-  // the native handler so ad-blocking + injection stay consistent.
-  if (targetURL.includes('web.cloudmoonapp.com')) {
-    return handleCloudMoon(request, CLOUDMOON_PREFIX);
   }
 
   const fetchDest = request.headers.get('Sec-Fetch-Dest');
