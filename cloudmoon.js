@@ -46,6 +46,18 @@ function isAdRequest(url) {
   return AD_PATTERNS.some(pattern => urlLower.includes(pattern));
 }
 
+// Root-relative URLs (src="/app.js", href="/style.css", action="/login") in the
+// real CloudMoon HTML resolve against the IFRAME's location (our worker + prefix),
+// not against web.cloudmoonapp.com. Without rewriting, they silently point at
+// unprefixed worker paths that fall into the universal proxy instead, breaking
+// every asset/script/API call and rendering a blank page. This prefixes them so
+// they stay routed through the native CloudMoon handler.
+function rewriteRootRelativeUrls(html, routePrefix) {
+  const attrPattern = /(src|href|action|poster)="\/(?!\/|proxy\/)/g;
+  html = html.replace(attrPattern, (match, attr) => `${attr}="${routePrefix}/`);
+  return html;
+}
+
 function blockAdsInHTML(html) {
   html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
@@ -342,6 +354,7 @@ export async function handleCloudMoon(request, routePrefix) {
   if (contentType.includes('text/html')) {
     let html = await response.text();
     html = blockAdsInHTML(html);
+    html = rewriteRootRelativeUrls(html, routePrefix);
 
     const injectionCode = `
 <style id="cm-ad-blocker-css">
@@ -361,23 +374,37 @@ export async function handleCloudMoon(request, routePrefix) {
 </style>
 <script id="cm-fix-js">
 (function(){
+  const ROUTE_PREFIX = '${routePrefix}';
+
+  function fixRootRelative(url) {
+    if (typeof url !== 'string') return url;
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('//')) return url;
+    if (url.startsWith(ROUTE_PREFIX + '/') || url === ROUTE_PREFIX) return url;
+    if (url.startsWith('/proxy/')) return url;
+    if (url.startsWith('/')) return ROUTE_PREFIX + url;
+    return url;
+  }
+
   const originalFetch = window.fetch;
   window.fetch = function(...args) {
-    const url = args[0];
-    if (typeof url === 'string' && isAdUrl(url)) {
-      console.log('[Ad Blocked]', url);
-      return Promise.reject(new Error('Ad blocked'));
+    let url = args[0];
+    if (typeof url === 'string') {
+      if (isAdUrl(url)) {
+        console.log('[Ad Blocked]', url);
+        return Promise.reject(new Error('Ad blocked'));
+      }
+      args[0] = fixRootRelative(url);
     }
     return originalFetch.apply(this, args);
   };
 
   const originalXHR = window.XMLHttpRequest.prototype.open;
-  window.XMLHttpRequest.prototype.open = function(method, url) {
+  window.XMLHttpRequest.prototype.open = function(method, url, ...rest) {
     if (isAdUrl(url)) {
       console.log('[Ad Blocked]', url);
       return;
     }
-    return originalXHR.apply(this, arguments);
+    return originalXHR.call(this, method, fixRootRelative(url), ...rest);
   };
 
   function isAdUrl(url) {
