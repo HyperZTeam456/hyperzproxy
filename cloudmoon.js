@@ -295,12 +295,14 @@ async function proxyCloudMoon(request) {
 
   // Run immediately
   fixButtons();
+  stripPopupTargets();
 
   // Run on DOM ready
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function() {
       fixButtons();
       removeAds();
+      stripPopupTargets();
       console.log('[CloudMoon] DOM ready - ads removed');
     });
   }
@@ -309,6 +311,7 @@ async function proxyCloudMoon(request) {
   window.addEventListener("load", function() {
     fixButtons();
     removeAds();
+    stripPopupTargets();
     console.log('[CloudMoon] Window loaded - ads removed');
   });
 
@@ -316,12 +319,14 @@ async function proxyCloudMoon(request) {
   setInterval(function() {
     fixButtons();
     removeAds();
+    stripPopupTargets();
   }, 200);
 
   // MutationObserver
   var observer = new MutationObserver(function() {
     fixButtons();
     removeAds();
+    stripPopupTargets();
   });
 
   function startObserver() {
@@ -349,8 +354,59 @@ async function proxyCloudMoon(request) {
       }
       return {closed: false, close: function(){}, focus: function(){}};
     }
-    return origOpen.call(this, u, t, f);
+    // ANY other popup/new-tab attempt: redirect current page to it instead of opening a new window
+    if (u) {
+      console.log('[Popup Intercepted -> redirecting current page]', u);
+      window.location.href = u;
+    }
+    return {closed: false, close: function(){}, focus: function(){}, blur: function(){}};
   };
+
+  // Intercept clicks on links/areas with a target that would open a new tab/window
+  // (target="_blank", "_new", etc.) and navigate the current page instead.
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el !== document.body && el.tagName !== 'A') {
+      el = el.parentElement;
+    }
+    if (el && el.tagName === 'A') {
+      var target = el.getAttribute('target');
+      var href = el.getAttribute('href') || el.href;
+      if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent' && href) {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[Link Redirect Intercepted -> redirecting current page]', href);
+        window.location.href = href;
+      }
+    }
+  }, true);
+
+  // Intercept form submissions targeting a new tab/window the same way.
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    var target = form.getAttribute && form.getAttribute('target');
+    if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent') {
+      form.removeAttribute('target');
+    }
+  }, true);
+
+  // Proactively strip target="_blank"/"_new"/etc. from links and forms so the
+  // browser's own default handling never races ahead of the click interceptor.
+  function stripPopupTargets() {
+    document.querySelectorAll('a[target]').forEach(function(a) {
+      var t = a.getAttribute('target');
+      if (t && t.toLowerCase() !== '_self' && t.toLowerCase() !== '_parent') {
+        a.removeAttribute('target');
+      }
+    });
+    document.querySelectorAll('form[target]').forEach(function(f) {
+      var t = f.getAttribute('target');
+      if (t && t.toLowerCase() !== '_self' && t.toLowerCase() !== '_parent') {
+        f.removeAttribute('target');
+      }
+    });
+  }
+  stripPopupTargets();
 
   // Listen for fullscreen requests from parent
   window.addEventListener('message', function(event) {
@@ -358,6 +414,7 @@ async function proxyCloudMoon(request) {
       var gameWrapper = document.querySelector('#gameWrapper');
       if (gameWrapper) {
         // Find UI elements to overlay on fullscreen
+
         var inputDiv = document.querySelector('#input-div');
         var sidebar = document.querySelector('.sidebar.sidebar-open') || document.querySelector('.sidebar');
         var floatingBall = document.querySelector('#floating-ball');
