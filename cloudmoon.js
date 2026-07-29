@@ -1,9 +1,3 @@
-// cloudmoon.js - Native CloudMoon Proxy Handler with Multi-Layer Shadow DOM Protection + Ad Blocking
-// This is your ORIGINAL script, completely UNMODIFIED internally.
-// The only change: no top-level addEventListener (worker.js owns that),
-// and handleRequest is exported so worker.js can call it directly.
-// Every path is still matched 1:1 against web.cloudmoonapp.com, exactly like before.
-
 const AD_PATTERNS = [
   'googlesyndication.com',
   'doubleclick.net',
@@ -53,7 +47,6 @@ function isAdRequest(url) {
 export async function handleCloudMoonRequest(request) {
   const url = new URL(request.url);
 
-  // Serve the main HTML page
   if (url.pathname === '/' || url.pathname === '') {
     return new Response(getMainHTML(), {
       headers: {
@@ -63,14 +56,12 @@ export async function handleCloudMoonRequest(request) {
     });
   }
 
-  // Serve manifest.json for PWA
   if (url.pathname === '/manifest.json') {
     return new Response(getManifest(), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  // Serve service worker for PWA
   if (url.pathname === '/sw.js') {
     return new Response(getServiceWorker(), {
       headers: {
@@ -80,7 +71,6 @@ export async function handleCloudMoonRequest(request) {
     });
   }
 
-  // Serve favicon.png from root — proxy Google Classroom's real icon
   if (url.pathname === '/favicon.png') {
     const iconRes = await fetch('https://ssl.gstatic.com/classroom/favicon.png');
     const iconHeaders = new Headers(iconRes.headers);
@@ -91,22 +81,18 @@ export async function handleCloudMoonRequest(request) {
     });
   }
 
-  // Proxy everything else to CloudMoon
   return proxyCloudMoon(request);
 }
 
 async function proxyCloudMoon(request) {
   const url = new URL(request.url);
 
-  // Build the target URL
   let targetURL;
 
   if (url.pathname.startsWith('/proxy/')) {
-    // Extract and decode the proxied URL
     const encodedURL = url.pathname.substring('/proxy/'.length);
     try {
       targetURL = decodeURIComponent(encodedURL);
-      // Add back query string if present
       if (url.search) {
         targetURL += url.search;
       }
@@ -115,11 +101,9 @@ async function proxyCloudMoon(request) {
       return new Response('Invalid proxy URL', { status: 400 });
     }
   } else {
-    // Direct proxy to CloudMoon
     targetURL = 'https://web.cloudmoonapp.com' + url.pathname + url.search;
   }
 
-  // Block ad requests
   if (isAdRequest(targetURL)) {
     console.log('Blocked ad request:', targetURL);
     return new Response('', { status: 204 });
@@ -153,7 +137,6 @@ async function proxyCloudMoon(request) {
     return new Response('Failed to fetch resource', { status: 502 });
   }
 
-  // If response is 404, log it but still return it
   if (response.status === 404) {
     console.log('Resource not found (404):', targetURL);
   }
@@ -172,12 +155,11 @@ async function proxyCloudMoon(request) {
   if (contentType.includes('text/html')) {
     let html = await response.text();
 
-    // Remove ad-related elements and scripts
     html = blockAdsInHTML(html);
+    html = rewriteLinksToProxy(html, targetURL);
 
     const injectionCode = `
 <style id="cm-ad-blocker-css">
-  /* Hide ONLY the specific ad container divs */
   .a-div-horizontal,
   .a-div-vertical,
   .a-div-placeholder,
@@ -194,7 +176,6 @@ async function proxyCloudMoon(request) {
 </style>
 <script id="cm-fix-js">
 (function(){
-  // Block ad network requests at runtime
   const originalFetch = window.fetch;
   window.fetch = function(...args) {
     const url = args[0];
@@ -224,9 +205,7 @@ async function proxyCloudMoon(request) {
     return adPatterns.some(pattern => url.toLowerCase().includes(pattern));
   }
 
-  // Remove ad elements from DOM - ONLY target specific ad containers
   function removeAds() {
-    // Only remove Google ad-related elements
     const googleAdSelectors = [
       'iframe[src*="googlesyndication"]',
       'iframe[src*="doubleclick"]',
@@ -245,7 +224,6 @@ async function proxyCloudMoon(request) {
       });
     });
 
-    // ONLY target the specific CloudMoon ad containers with exact class names
     const adDivs = document.querySelectorAll('.a-div-horizontal, .a-div-vertical, .a-div-placeholder, .a-div-box');
     adDivs.forEach(el => {
       el.style.display = 'none';
@@ -266,7 +244,6 @@ async function proxyCloudMoon(request) {
       var btn = allBtns[i];
       var styleAttr = btn.getAttribute("style") || "";
 
-      // Check for purple background (123, 108, 196) - SHOW this button
       if (styleAttr.indexOf("123, 108, 196") !== -1 || styleAttr.indexOf("123,108,196") !== -1) {
         btn.style.setProperty("display", "flex", "important");
         btn.style.setProperty("visibility", "visible", "important");
@@ -282,7 +259,6 @@ async function proxyCloudMoon(request) {
         btn.style.setProperty("cursor", "pointer", "important");
         btn.style.setProperty("font-size", "1rem", "important");
       }
-      // Check for white background - HIDE this button (OAuth)
       else if (styleAttr.indexOf("255, 255, 255") !== -1 || styleAttr.indexOf("#fff") !== -1 || styleAttr.indexOf("white") !== -1 || btn.querySelector("svg")) {
         btn.style.setProperty("display", "none", "important");
         btn.style.setProperty("visibility", "hidden", "important");
@@ -290,14 +266,11 @@ async function proxyCloudMoon(request) {
     }
   }
 
-  // Run ad removal immediately
   removeAds();
 
-  // Run immediately
   fixButtons();
   stripPopupTargets();
 
-  // Run on DOM ready
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function() {
       fixButtons();
@@ -307,7 +280,6 @@ async function proxyCloudMoon(request) {
     });
   }
 
-  // Run on window load
   window.addEventListener("load", function() {
     fixButtons();
     removeAds();
@@ -315,14 +287,12 @@ async function proxyCloudMoon(request) {
     console.log('[CloudMoon] Window loaded - ads removed');
   });
 
-  // Run every 200ms (balanced performance and ad blocking)
   setInterval(function() {
     fixButtons();
     removeAds();
     stripPopupTargets();
   }, 200);
 
-  // MutationObserver
   var observer = new MutationObserver(function() {
     fixButtons();
     removeAds();
@@ -343,27 +313,35 @@ async function proxyCloudMoon(request) {
   }
   startObserver();
 
-  // Intercept window.open for games - now proxy through worker
+  function toProxyPath(rawUrl) {
+    try {
+      var abs = new URL(rawUrl, window.location.href);
+      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return rawUrl;
+      if (abs.origin === window.location.origin) return rawUrl;
+      return '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+    } catch (e) {
+      return rawUrl;
+    }
+  }
+
   var origOpen = window.open;
   window.open = function(u, t, f) {
     if (u && u.indexOf("run-site") > -1) {
       if (window.parent && window.parent !== window) {
         window.parent.postMessage({type: "LOAD_GAME", url: u}, "*");
       } else {
-        window.location.href = u;
+        window.location.href = toProxyPath(u);
       }
       return {closed: false, close: function(){}, focus: function(){}};
     }
-    // ANY other popup/new-tab attempt: redirect current page to it instead of opening a new window
     if (u) {
-      console.log('[Popup Intercepted -> redirecting current page]', u);
-      window.location.href = u;
+      var proxied = toProxyPath(u);
+      console.log('[Popup Intercepted -> redirecting current page]', proxied);
+      window.location.href = proxied;
     }
     return {closed: false, close: function(){}, focus: function(){}, blur: function(){}};
   };
 
-  // Intercept clicks on links/areas with a target that would open a new tab/window
-  // (target="_blank", "_new", etc.) and navigate the current page instead.
   document.addEventListener('click', function(e) {
     var el = e.target;
     while (el && el !== document.body && el.tagName !== 'A') {
@@ -375,13 +353,13 @@ async function proxyCloudMoon(request) {
       if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent' && href) {
         e.preventDefault();
         e.stopPropagation();
-        console.log('[Link Redirect Intercepted -> redirecting current page]', href);
-        window.location.href = href;
+        var proxied = toProxyPath(href);
+        console.log('[Link Redirect Intercepted -> redirecting current page]', proxied);
+        window.location.href = proxied;
       }
     }
   }, true);
 
-  // Intercept form submissions targeting a new tab/window the same way.
   document.addEventListener('submit', function(e) {
     var form = e.target;
     var target = form.getAttribute && form.getAttribute('target');
@@ -390,8 +368,6 @@ async function proxyCloudMoon(request) {
     }
   }, true);
 
-  // Proactively strip target="_blank"/"_new"/etc. from links and forms so the
-  // browser's own default handling never races ahead of the click interceptor.
   function stripPopupTargets() {
     document.querySelectorAll('a[target]').forEach(function(a) {
       var t = a.getAttribute('target');
@@ -408,18 +384,15 @@ async function proxyCloudMoon(request) {
   }
   stripPopupTargets();
 
-  // Listen for fullscreen requests from parent
   window.addEventListener('message', function(event) {
     if (event.data && event.data.type === 'REQUEST_FULLSCREEN') {
       var gameWrapper = document.querySelector('#gameWrapper');
       if (gameWrapper) {
-        // Find UI elements to overlay on fullscreen
 
         var inputDiv = document.querySelector('#input-div');
         var sidebar = document.querySelector('.sidebar.sidebar-open') || document.querySelector('.sidebar');
         var floatingBall = document.querySelector('#floating-ball');
 
-        // Store original parents, styles, and positions for restoration
         var elementsToRestore = [];
 
         function storeAndMoveElement(element) {
@@ -447,34 +420,28 @@ async function proxyCloudMoon(request) {
             position: originalPosition
           });
 
-          // Move into game wrapper and style for overlay
           gameWrapper.appendChild(element);
           element.style.position = 'fixed';
           element.style.zIndex = '999999';
           element.style.pointerEvents = 'auto';
 
-          // Preserve original bottom/left positioning if it exists
           if (element.id === 'input-div') {
             element.style.bottom = '20px';
             element.style.left = '0px';
           } else if (element.id === 'floating-ball') {
-            // Keep floating ball visible
             element.style.left = '0px';
             element.style.top = '50%';
             element.style.transform = 'translateY(-50%)';
           }
         }
 
-        // Ensure gameWrapper can contain positioned elements
         var originalWrapperPosition = gameWrapper.style.position;
         gameWrapper.style.position = 'relative';
 
-        // Move elements
         storeAndMoveElement(inputDiv);
         storeAndMoveElement(sidebar);
         storeAndMoveElement(floatingBall);
 
-        // Request fullscreen
         var fullscreenPromise = null;
         if (gameWrapper.requestFullscreen) {
           fullscreenPromise = gameWrapper.requestFullscreen();
@@ -486,25 +453,20 @@ async function proxyCloudMoon(request) {
           fullscreenPromise = gameWrapper.msRequestFullscreen();
         }
 
-        // Listen for fullscreen exit to restore elements
         var fullscreenExitHandler = function() {
-          // Check if we're actually exiting fullscreen
           if (document.fullscreenElement || document.webkitFullscreenElement ||
               document.mozFullScreenElement || document.msFullscreenElement) {
-            return; // Still in fullscreen, don't restore
+            return;
           }
 
-          // Restore all elements
           elementsToRestore.forEach(function(item) {
             if (item.element && item.parent) {
-              // Restore to original position in DOM
               if (item.nextSibling && item.nextSibling.parentNode === item.parent) {
                 item.parent.insertBefore(item.element, item.nextSibling);
               } else {
                 item.parent.appendChild(item.element);
               }
 
-              // Restore original style attribute
               if (item.styleAttr) {
                 item.element.setAttribute('style', item.styleAttr);
               } else {
@@ -513,14 +475,12 @@ async function proxyCloudMoon(request) {
             }
           });
 
-          // Restore gameWrapper position
           if (originalWrapperPosition) {
             gameWrapper.style.position = originalWrapperPosition;
           } else {
             gameWrapper.style.position = '';
           }
 
-          // Remove listeners
           document.removeEventListener('fullscreenchange', fullscreenExitHandler);
           document.removeEventListener('webkitfullscreenchange', fullscreenExitHandler);
           document.removeEventListener('mozfullscreenchange', fullscreenExitHandler);
@@ -529,7 +489,6 @@ async function proxyCloudMoon(request) {
           console.log('[CloudMoon] Fullscreen exited, UI restored');
         };
 
-        // Add listeners for fullscreen exit (cross-browser)
         document.addEventListener('fullscreenchange', fullscreenExitHandler);
         document.addEventListener('webkitfullscreenchange', fullscreenExitHandler);
         document.addEventListener('mozfullscreenchange', fullscreenExitHandler);
@@ -562,7 +521,6 @@ async function proxyCloudMoon(request) {
     });
   }
 
-  // Block ads in JavaScript files
   if (contentType.includes('javascript') || contentType.includes('application/x-javascript')) {
     if (isAdRequest(targetURL)) {
       console.log('Blocked ad script:', targetURL);
@@ -580,26 +538,40 @@ async function proxyCloudMoon(request) {
   });
 }
 
+function rewriteLinksToProxy(html, baseURL) {
+  return html.replace(/(<a\b[^>]*\shref)=("[^"]*"|'[^']*')/gi, function(match, prefix, quoted) {
+    const quote = quoted[0];
+    const raw = quoted.slice(1, -1);
+    if (!raw || raw.startsWith('#') || /^(javascript|mailto|tel|data):/i.test(raw)) {
+      return match;
+    }
+    try {
+      const abs = new URL(raw, baseURL);
+      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') {
+        return match;
+      }
+      const proxyPath = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      return prefix + '=' + quote + proxyPath + quote;
+    } catch (e) {
+      return match;
+    }
+  });
+}
+
 function blockAdsInHTML(html) {
-  // Remove Google AdSense scripts
   html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
 
-  // Remove Google Analytics
   html = html.replace(/<script[^>]*google-analytics[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*googletagmanager[^>]*>[\s\S]*?<\/script>/gi, '');
 
-  // Remove DoubleClick
   html = html.replace(/<script[^>]*doubleclick[^>]*>[\s\S]*?<\/script>/gi, '');
 
-  // Remove ad iframes
   html = html.replace(/<iframe[^>]*googlesyndication[^>]*>[\s\S]*?<\/iframe>/gi, '');
   html = html.replace(/<iframe[^>]*doubleclick[^>]*>[\s\S]*?<\/iframe>/gi, '');
 
-  // Remove ad insertion elements
   html = html.replace(/<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi, '');
 
-  // Remove divs with ad IDs
   html = html.replace(/<div[^>]*id="google_ads[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
 
   return html;
@@ -665,7 +637,6 @@ function getMainHTML() {
             outline: none;
         }
 
-        /* Floating button dock — bottom left */
         #btn-dock {
             position: fixed;
             bottom: 18px;
@@ -839,13 +810,11 @@ function getMainHTML() {
                     try {
                         currentIframe.contentWindow.focus();
                     } catch (e) {
-                        // Cross-origin, expected
                     }
                 }
             }, 100);
         }
 
-        // Initialize with multi-layer shadow DOM
         createMultiLayerShadowFrame(mainURL, false);
 
         document.addEventListener('click', (e) => {
@@ -866,17 +835,13 @@ function getMainHTML() {
             let fixedURL = url;
             const workerDomain = window.location.origin;
 
-            // Check if URL is already on our worker domain
             if (url.includes(workerDomain)) {
-                // Already on our domain, use as-is (avoid double-proxying)
                 fixedURL = url;
                 console.log('Game URL already on worker domain, using directly');
             } else if (url.includes('://')) {
-                // External URL - proxy it through worker
                 fixedURL = workerDomain + '/proxy/' + encodeURIComponent(url);
                 console.log('External game URL, proxying through worker');
             } else if (url.startsWith('/')) {
-                // Relative URL - keep it (will be proxied automatically)
                 fixedURL = url;
                 console.log('Relative game URL, using as-is');
             }
@@ -895,35 +860,28 @@ function getMainHTML() {
             isShowingGame = false;
             homeBtn.style.display = 'none';
 
-            // Exit fullscreen if active
             if (document.fullscreenElement) {
                 document.exitFullscreen();
             }
         }
 
         function enterFullscreen() {
-            // Try to send message to iframe to fullscreen the game container
             if (currentIframe) {
                 try {
-                    // Send message through all shadow layers to reach the iframe
                     currentIframe.contentWindow.postMessage({type: 'REQUEST_FULLSCREEN'}, '*');
                     console.log('Sent fullscreen request to game container');
                 } catch (e) {
                     console.log('Cannot send message to iframe (cross-origin), using fallback');
-                    // Fallback to document fullscreen
                     document.documentElement.requestFullscreen();
                 }
             } else {
-                // No iframe, use document fullscreen
                 document.documentElement.requestFullscreen();
             }
-            // Hide the dock while fullscreen
             btnDock.classList.add('hidden');
         }
 
         document.addEventListener('fullscreenchange', () => {
             if (!document.fullscreenElement) {
-                // Restore dock when exiting fullscreen
                 btnDock.classList.remove('hidden');
             }
         });
@@ -931,7 +889,6 @@ function getMainHTML() {
         console.log('%c CloudMoon Proxy Active with Ad Blocking', 'color: #667eea; font-size: 18px; font-weight: bold;');
         console.log(\`%c Multi-Layer Shadow DOM Protection: \${SHADOW_LAYERS} Layers\`, 'color: #10b981; font-size: 14px; font-weight: bold;');
 
-        // Register Service Worker for PWA
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('/sw.js')
@@ -1007,11 +964,9 @@ function getManifest() {
 }
 
 function getServiceWorker() {
-  return `// CloudMoon InPlay Service Worker
-const CACHE_NAME = 'cloudmoon-v1';
+  return `const CACHE_NAME = 'cloudmoon-v1';
 const RUNTIME_CACHE = 'cloudmoon-runtime';
 
-// Install event - cache essential resources
 self.addEventListener('install', (event) => {
   console.log('[ServiceWorker] Install');
   event.waitUntil(
@@ -1029,7 +984,6 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activate event - clean up old caches
 self.addEventListener('activate', (event) => {
   console.log('[ServiceWorker] Activate');
   event.waitUntil(
@@ -1048,9 +1002,7 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Fetch event - network first, fallback to cache
 self.addEventListener('fetch', (event) => {
-  // Skip cross-origin requests - let browser handle them
   if (!event.request.url.startsWith(self.location.origin)) {
     return;
   }
@@ -1058,7 +1010,6 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // If response is valid, clone it and cache it
         if (response && response.status === 200) {
           const responseToCache = response.clone();
           caches.open(RUNTIME_CACHE).then((cache) => {
@@ -1071,16 +1022,13 @@ self.addEventListener('fetch', (event) => {
       })
       .catch((error) => {
         console.log('[ServiceWorker] Fetch failed, trying cache:', event.request.url);
-        // If network fails, try to serve from cache
         return caches.match(event.request).then((response) => {
           if (response) {
             return response;
           }
-          // If not in cache, return a basic offline page for navigation
           if (event.request.mode === 'navigate') {
             return caches.match('/');
           }
-          // For other resources, return a minimal response to prevent errors
           return new Response('', {
             status: 200,
             statusText: 'OK',
@@ -1091,7 +1039,6 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
-// Handle messages from clients
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
