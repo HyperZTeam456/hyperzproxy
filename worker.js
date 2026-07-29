@@ -1,18 +1,3 @@
-// worker.js - Mode dispatcher ONLY. No CloudMoon logic lives here.
-//
-// Why a cookie instead of a URL prefix: your original cloudmoon.js maps EVERY
-// path 1:1 onto web.cloudmoonapp.com (e.g. "/app.js" -> "https://web.cloudmoonapp.com/app.js").
-// That only works if cloudmoon.js owns the ENTIRE path space with no prefix in front of it —
-// the instant you stick a "/web.cloudmoonapp.com" prefix in the URL to route it, every
-// root-relative asset the real site requests (scripts, API calls, etc.) loses that prefix
-// and falls into the wrong handler. A URL-based prefix and "give cloudmoon.js the whole
-// path space unmodified" are mutually exclusive.
-//
-// So: a cookie flips the ENTIRE worker into "CloudMoon mode." While the cookie is set,
-// literally everything goes straight to handleCloudMoonRequest(request), completely
-// unmodified, exactly like when it was the only thing on the worker. No path is reserved,
-// nothing is stripped, nothing is rewritten.
-
 import { handleCloudMoonRequest } from './cloudmoon.js';
 
 addEventListener('fetch', event => {
@@ -78,9 +63,6 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  // ENTRY: visiting /web.cloudmoonapp.com sets the mode cookie and redirects to "/",
-  // which — now that the cookie is set — goes straight into cloudmoon.js's own root
-  // handler (the shell page), unmodified.
   if (pathname === ENTER_PATH) {
     return new Response(null, {
       status: 302,
@@ -91,7 +73,6 @@ async function handleRequest(request) {
     });
   }
 
-  // EXIT: leave CloudMoon mode, go back to the universal proxy.
   if (pathname === EXIT_PATH) {
     return new Response(null, {
       status: 302,
@@ -102,13 +83,9 @@ async function handleRequest(request) {
     });
   }
 
-  // If we're in CloudMoon mode, hand off EVERY path unmodified. No stripping,
-  // no rewriting — cloudmoon.js decides everything, exactly like your original script.
   if (hasCloudMoonCookie(request)) {
     return handleCloudMoonRequest(request);
   }
-
-  // --- Otherwise: universal proxy mode ---
 
   if (pathname === '/' || pathname === '') {
     return new Response('url not specified', {
@@ -179,7 +156,6 @@ function parseUniversalURL(pathname, search) {
     }
     targetURL = decoded;
   } catch (e) {
-    // fall through with original targetPath
   }
 
   if (targetURL.startsWith('http://') || targetURL.startsWith('https://')) {
@@ -249,6 +225,7 @@ async function proxyRequest(request, targetURL) {
   if (contentType.includes('text/html')) {
     let html = await response.text();
     html = blockAdsInHTML(html);
+    html = rewriteLinksToProxy(html, targetURL);
 
     const injectionCode = `
 <style id="ad-blocker-css">
@@ -345,17 +322,27 @@ async function proxyRequest(request, targetURL) {
     });
   }
 
-  // Redirect any popup/new-window attempt to the current page instead
+  function toProxyPath(rawUrl) {
+    try {
+      var abs = new URL(rawUrl, window.location.href);
+      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return rawUrl;
+      if (abs.origin === window.location.origin) return rawUrl;
+      return '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+    } catch (e) {
+      return rawUrl;
+    }
+  }
+
   var origOpen = window.open;
   window.open = function(u, t, f) {
     if (u) {
-      console.log('[Popup Intercepted -> redirecting current page]', u);
-      window.location.href = u;
+      var proxied = toProxyPath(u);
+      console.log('[Popup Intercepted -> redirecting current page]', proxied);
+      window.location.href = proxied;
     }
     return { closed: false, close: function(){}, focus: function(){}, blur: function(){} };
   };
 
-  // Intercept target="_blank"/"_new" link clicks and navigate current page instead
   document.addEventListener('click', function(e) {
     var el = e.target;
     while (el && el !== document.body && el.tagName !== 'A') {
@@ -367,8 +354,9 @@ async function proxyRequest(request, targetURL) {
       if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent' && href) {
         e.preventDefault();
         e.stopPropagation();
-        console.log('[Link Redirect Intercepted -> redirecting current page]', href);
-        window.location.href = href;
+        var proxied = toProxyPath(href);
+        console.log('[Link Redirect Intercepted -> redirecting current page]', proxied);
+        window.location.href = proxied;
       }
     }
   }, true);
@@ -406,7 +394,6 @@ async function proxyRequest(request, targetURL) {
 })();
 </script>`;
 
-
     if (html.includes('</head>')) {
       html = html.replace('</head>', injectionCode + '</head>');
     } else {
@@ -434,6 +421,26 @@ async function proxyRequest(request, targetURL) {
     status: response.status,
     statusText: response.statusText,
     headers: newHeaders
+  });
+}
+
+function rewriteLinksToProxy(html, baseURL) {
+  return html.replace(/(<a\b[^>]*\shref)=("[^"]*"|'[^']*')/gi, function(match, prefix, quoted) {
+    const quote = quoted[0];
+    const raw = quoted.slice(1, -1);
+    if (!raw || raw.startsWith('#') || /^(javascript|mailto|tel|data):/i.test(raw)) {
+      return match;
+    }
+    try {
+      const abs = new URL(raw, baseURL);
+      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') {
+        return match;
+      }
+      const proxyPath = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      return prefix + '=' + quote + proxyPath + quote;
+    } catch (e) {
+      return match;
+    }
   });
 }
 
