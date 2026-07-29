@@ -318,6 +318,12 @@ async function proxyCloudMoon(request) {
       var abs = new URL(rawUrl, window.location.href);
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return rawUrl;
       if (abs.origin === window.location.origin) return rawUrl;
+      if (abs.hostname === 'web.cloudmoonapp.com') {
+        if (abs.pathname === '/' || abs.pathname === '') {
+          return '/web.cloudmoonapp.com/' + abs.search + abs.hash;
+        }
+        return abs.pathname + abs.search + abs.hash;
+      }
       return '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
     } catch (e) {
       return rawUrl;
@@ -550,7 +556,14 @@ function rewriteLinksToProxy(html, baseURL) {
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') {
         return match;
       }
-      const proxyPath = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      let proxyPath;
+      if (abs.hostname === 'web.cloudmoonapp.com') {
+        proxyPath = (abs.pathname === '/' || abs.pathname === '')
+          ? '/web.cloudmoonapp.com/' + abs.search + abs.hash
+          : abs.pathname + abs.search + abs.hash;
+      } else {
+        proxyPath = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      }
       return prefix + '=' + quote + proxyPath + quote;
     } catch (e) {
       return match;
@@ -776,6 +789,7 @@ function getMainHTML() {
                     iframe.setAttribute('data-secure', 'true');
 
                     iframe.src = url;
+                    lastGoodSrc = url;
 
                     shadowRoot.appendChild(iframe);
                     currentIframe = iframe;
@@ -788,11 +802,38 @@ function getMainHTML() {
                         console.error('Iframe error:', e);
                     });
 
+                    startWatchdog();
+
                     console.log(\`%c Final Shadow Layer \${SHADOW_LAYERS} with iframe created\`, 'color: #10b981; font-weight: bold;');
                 }
             }
 
             console.log(\`%c \${SHADOW_LAYERS}-Layer Shadow DOM Protection Active\`, 'color: #667eea; font-size: 14px; font-weight: bold;');
+        }
+
+        let lastGoodSrc = mainURL;
+        let watchdogInterval = null;
+
+        function startWatchdog() {
+            if (watchdogInterval) return;
+            watchdogInterval = setInterval(() => {
+                if (!currentIframe) return;
+                let loc;
+                try {
+                    loc = currentIframe.contentWindow.location.href;
+                } catch (e) {
+                    console.warn('[Watchdog] iframe escaped to a non-hyperzproxy origin, resetting');
+                    currentIframe.src = lastGoodSrc;
+                    return;
+                }
+                if (loc === 'about:blank') return;
+                if (loc.indexOf(window.location.origin) === 0) {
+                    lastGoodSrc = loc.slice(window.location.origin.length) || '/';
+                } else {
+                    console.warn('[Watchdog] iframe on a non-hyperzproxy URL, resetting:', loc);
+                    currentIframe.src = lastGoodSrc;
+                }
+            }, 50);
         }
 
         function generateRandomId() {
