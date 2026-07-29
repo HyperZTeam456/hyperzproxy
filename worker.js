@@ -63,11 +63,12 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  if (pathname === ENTER_PATH) {
+  if (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/')) {
+    const afterPath = pathname.slice(ENTER_PATH.length) || '/';
     return new Response(null, {
       status: 302,
       headers: {
-        'Location': '/',
+        'Location': afterPath + url.search,
         'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=Lax`
       }
     });
@@ -327,6 +328,9 @@ async function proxyRequest(request, targetURL) {
       var abs = new URL(rawUrl, window.location.href);
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return rawUrl;
       if (abs.origin === window.location.origin) return rawUrl;
+      if (abs.hostname === 'web.cloudmoonapp.com') {
+        return '/web.cloudmoonapp.com' + abs.pathname + abs.search + abs.hash;
+      }
       return '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
     } catch (e) {
       return rawUrl;
@@ -436,7 +440,12 @@ function rewriteLinksToProxy(html, baseURL) {
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') {
         return match;
       }
-      const proxyPath = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      let proxyPath;
+      if (abs.hostname === 'web.cloudmoonapp.com') {
+        proxyPath = '/web.cloudmoonapp.com' + abs.pathname + abs.search + abs.hash;
+      } else {
+        proxyPath = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      }
       return prefix + '=' + quote + proxyPath + quote;
     } catch (e) {
       return match;
@@ -478,6 +487,10 @@ function getUniversalWrapper(targetURL) {
         const SANDBOX_ATTRS = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock';
         const ALLOW_PERMISSIONS = 'accelerometer; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; clipboard-read; clipboard-write; xr-spatial-tracking; gamepad';
 
+        let currentIframe = null;
+        let lastGoodSrc = '/proxy/' + encodeURIComponent(targetURL);
+        let watchdogInterval = null;
+
         function createMultiLayerShadowFrame(url) {
             const frameContainer = document.getElementById('frame-container');
             frameContainer.innerHTML = '';
@@ -502,10 +515,36 @@ function getUniversalWrapper(targetURL) {
                     iframe.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
                     iframe.setAttribute('importance', 'high');
                     iframe.setAttribute('loading', 'eager');
-                    iframe.src = '/proxy/' + encodeURIComponent(url);
+                    const src = '/proxy/' + encodeURIComponent(url);
+                    iframe.src = src;
+                    lastGoodSrc = src;
                     shadowRoot.appendChild(iframe);
+                    currentIframe = iframe;
+                    startWatchdog();
                 }
             }
+        }
+
+        function startWatchdog() {
+            if (watchdogInterval) return;
+            watchdogInterval = setInterval(() => {
+                if (!currentIframe) return;
+                let loc;
+                try {
+                    loc = currentIframe.contentWindow.location.href;
+                } catch (e) {
+                    console.warn('[Watchdog] iframe escaped to a non-hyperzproxy origin, resetting');
+                    currentIframe.src = lastGoodSrc;
+                    return;
+                }
+                if (loc === 'about:blank') return;
+                if (loc.indexOf(window.location.origin) === 0) {
+                    lastGoodSrc = loc.slice(window.location.origin.length) || '/';
+                } else {
+                    console.warn('[Watchdog] iframe on a non-hyperzproxy URL, resetting:', loc);
+                    currentIframe.src = lastGoodSrc;
+                }
+            }, 50);
         }
 
         createMultiLayerShadowFrame(targetURL);
