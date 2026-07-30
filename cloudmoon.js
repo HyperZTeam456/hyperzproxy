@@ -543,7 +543,14 @@ async function proxyCloudMoon(request) {
 })();
 </script>`;
 
-    if (html.includes('</head>')) {
+    // Inject right after <head> opens (not before </head> closes) so our
+    // window.open/Location overrides run BEFORE any of the page's own <head>
+    // scripts get a chance to capture the original window.open reference into
+    // a variable — which would make our later override useless for those calls.
+    const headOpenMatch = html.match(/<head[^>]*>/i);
+    if (headOpenMatch) {
+      html = html.replace(headOpenMatch[0], headOpenMatch[0] + injectionCode);
+    } else if (html.includes('</head>')) {
       html = html.replace('</head>', injectionCode + '</head>');
     } else {
       html = injectionCode + html;
@@ -922,6 +929,16 @@ function getMainHTML() {
             if (url.includes(workerDomain)) {
                 fixedURL = url;
                 console.log('Game URL already on worker domain, using directly');
+            } else if (url.indexOf('web.cloudmoonapp.com') > -1) {
+                try {
+                    const abs = new URL(url);
+                    fixedURL = (abs.pathname === '/' || abs.pathname === '')
+                        ? '/web.cloudmoonapp.com/' + abs.search + abs.hash
+                        : abs.pathname + abs.search + abs.hash;
+                    console.log('CloudMoon game URL, using clean unprefixed path');
+                } catch (e) {
+                    fixedURL = workerDomain + '/proxy/' + encodeURIComponent(url);
+                }
             } else if (url.includes('://')) {
                 fixedURL = workerDomain + '/proxy/' + encodeURIComponent(url);
                 console.log('External game URL, proxying through worker');
