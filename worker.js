@@ -63,17 +63,8 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  if (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/')) {
-    const afterPath = pathname.slice(ENTER_PATH.length) || '/';
-    return new Response(null, {
-      status: 302,
-      headers: {
-        'Location': afterPath + url.search,
-        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=Lax`
-      }
-    });
-  }
-
+  // EXIT must be checked before the cookie check — its whole job is to escape
+  // CloudMoon mode, so it can't be swallowed by the "cookie set -> go to CloudMoon" rule.
   if (pathname === EXIT_PATH) {
     return new Response(null, {
       status: 302,
@@ -84,8 +75,26 @@ async function handleRequest(request) {
     });
   }
 
+  // Cookie check comes next. If we're already in CloudMoon mode, every remaining
+  // path (including the shell's own internal "/web.cloudmoonapp.com/" iframe target)
+  // goes straight to handleCloudMoonRequest unmodified. Checking ENTER_PATH before
+  // this was the regression: it hijacked that internal path and redirected back to
+  // the shell instead of fetching real content, causing a whitescreen.
   if (hasCloudMoonCookie(request)) {
     return handleCloudMoonRequest(request);
+  }
+
+  // ENTER only matters when there's no cookie yet — genuinely entering CloudMoon
+  // mode for the first time (or after a fresh browser/no cookies).
+  if (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/')) {
+    const afterPath = pathname.slice(ENTER_PATH.length) || '/';
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location': afterPath + url.search,
+        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=Lax`
+      }
+    });
   }
 
   if (pathname === '/' || pathname === '') {
@@ -365,6 +374,30 @@ async function proxyRequest(request, targetURL) {
     }
   }, true);
 
+  document.addEventListener('click', function() {
+    var startHref = window.location.href;
+    setTimeout(function() {
+      var nowHref = window.location.href;
+      if (nowHref !== startHref && nowHref.indexOf(window.location.origin) !== 0) {
+        try { window.stop(); } catch (e) {}
+        var proxied = toProxyPath(nowHref);
+        console.log('[Non-link Redirect Trapped -> correcting]', proxied);
+        window.location.href = proxied;
+      }
+    }, 0);
+  }, true);
+
+  var origAssign = Location.prototype.assign;
+  var origReplace = Location.prototype.replace;
+  try {
+    Location.prototype.assign = function(u) {
+      return origAssign.call(this, toProxyPath(u));
+    };
+    Location.prototype.replace = function(u) {
+      return origReplace.call(this, toProxyPath(u));
+    };
+  } catch (e) {}
+
   document.addEventListener('submit', function(e) {
     var form = e.target;
     var target = form.getAttribute && form.getAttribute('target');
@@ -525,7 +558,11 @@ function getUniversalWrapper(targetURL) {
             }
         }
 
+        let blankSinceMs = null;
+        const BLANK_GRACE_MS = 600;
+
         function startWatchdog() {
+            blankSinceMs = null;
             if (watchdogInterval) return;
             watchdogInterval = setInterval(() => {
                 if (!currentIframe) return;
@@ -535,9 +572,20 @@ function getUniversalWrapper(targetURL) {
                 } catch (e) {
                     console.warn('[Watchdog] iframe escaped to a non-hyperzproxy origin, resetting');
                     currentIframe.src = lastGoodSrc;
+                    blankSinceMs = null;
                     return;
                 }
-                if (loc === 'about:blank') return;
+                if (loc === 'about:blank') {
+                    if (blankSinceMs === null) {
+                        blankSinceMs = Date.now();
+                    } else if (Date.now() - blankSinceMs > BLANK_GRACE_MS) {
+                        console.warn('[Watchdog] iframe stuck on about:blank (likely a blocked/refused load), resetting');
+                        currentIframe.src = lastGoodSrc;
+                        blankSinceMs = null;
+                    }
+                    return;
+                }
+                blankSinceMs = null;
                 if (loc.indexOf(window.location.origin) === 0) {
                     lastGoodSrc = loc.slice(window.location.origin.length) || '/';
                 } else {
