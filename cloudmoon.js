@@ -366,6 +366,35 @@ async function proxyCloudMoon(request) {
     }
   }, true);
 
+  // Catch-all: click handlers on non-<a> elements (div onclick, button, etc.) that call
+  // location.href/assign/replace directly with a raw external URL. Browsers don't allow
+  // overriding the location.href setter, so this traps it right after the click instead:
+  // location changes are queued as a task, so a 0ms timeout runs in the brief gap before
+  // the new document actually loads, letting us abort with window.stop() and correct it.
+  document.addEventListener('click', function() {
+    var startHref = window.location.href;
+    setTimeout(function() {
+      var nowHref = window.location.href;
+      if (nowHref !== startHref && nowHref.indexOf(window.location.origin) !== 0) {
+        try { window.stop(); } catch (e) {}
+        var proxied = toProxyPath(nowHref);
+        console.log('[Non-link Redirect Trapped -> correcting]', proxied);
+        window.location.href = proxied;
+      }
+    }, 0);
+  }, true);
+
+  var origAssign = Location.prototype.assign;
+  var origReplace = Location.prototype.replace;
+  try {
+    Location.prototype.assign = function(u) {
+      return origAssign.call(this, toProxyPath(u));
+    };
+    Location.prototype.replace = function(u) {
+      return origReplace.call(this, toProxyPath(u));
+    };
+  } catch (e) {}
+
   document.addEventListener('submit', function(e) {
     var form = e.target;
     var target = form.getAttribute && form.getAttribute('target');
@@ -813,8 +842,11 @@ function getMainHTML() {
 
         let lastGoodSrc = mainURL;
         let watchdogInterval = null;
+        let blankSinceMs = null;
+        const BLANK_GRACE_MS = 600;
 
         function startWatchdog() {
+            blankSinceMs = null;
             if (watchdogInterval) return;
             watchdogInterval = setInterval(() => {
                 if (!currentIframe) return;
@@ -824,9 +856,20 @@ function getMainHTML() {
                 } catch (e) {
                     console.warn('[Watchdog] iframe escaped to a non-hyperzproxy origin, resetting');
                     currentIframe.src = lastGoodSrc;
+                    blankSinceMs = null;
                     return;
                 }
-                if (loc === 'about:blank') return;
+                if (loc === 'about:blank') {
+                    if (blankSinceMs === null) {
+                        blankSinceMs = Date.now();
+                    } else if (Date.now() - blankSinceMs > BLANK_GRACE_MS) {
+                        console.warn('[Watchdog] iframe stuck on about:blank (likely a blocked/refused load), resetting');
+                        currentIframe.src = lastGoodSrc;
+                        blankSinceMs = null;
+                    }
+                    return;
+                }
+                blankSinceMs = null;
                 if (loc.indexOf(window.location.origin) === 0) {
                     lastGoodSrc = loc.slice(window.location.origin.length) || '/';
                 } else {
