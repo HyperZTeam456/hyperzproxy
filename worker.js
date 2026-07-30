@@ -431,7 +431,10 @@ async function proxyRequest(request, targetURL) {
 })();
 </script>`;
 
-    if (html.includes('</head>')) {
+    const headOpenMatch = html.match(/<head[^>]*>/i);
+    if (headOpenMatch) {
+      html = html.replace(headOpenMatch[0], headOpenMatch[0] + injectionCode);
+    } else if (html.includes('</head>')) {
       html = html.replace('</head>', injectionCode + '</head>');
     } else {
       html = injectionCode + html;
