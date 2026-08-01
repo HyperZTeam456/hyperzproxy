@@ -92,7 +92,7 @@ async function handleRequest(request) {
       status: 302,
       headers: {
         'Location': afterPath + url.search,
-        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=None; Secure`
+        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=5; SameSite=None; Secure`
       }
     });
   }
