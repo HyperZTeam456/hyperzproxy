@@ -75,35 +75,32 @@ async function handleRequest(request) {
     });
   }
 
-  // ── CloudMoon routing (stateless — no persistent cookie) ──
-  // CloudMoon mode is determined by the PATH, not a cookie. If the path starts
-  // with /web.cloudmoonapp.com, route to CloudMoon. This means:
-  //  - /web.cloudmoonapp.com      → CloudMoon (enter)
-  //  - /web.cloudmoonapp.com/...  → CloudMoon (internal navigation)
+  // ── CloudMoon routing ──
+  // CloudMoon mode is triggered by the path /web.cloudmoonapp.com. We set a
+  // very short-lived cookie (1 second) just long enough for the redirect to
+  // land and the CloudMoon shell to establish its session. After 1 second the
+  // cookie expires naturally — it won't hijack future non-CloudMoon requests.
+  //
+  // Routing:
+  //  - /web.cloudmoonapp.com      → set 1s cookie, redirect to CloudMoon shell
+  //  - /web.cloudmoonapp.com/...  → CloudMoon internal navigation
   //  - /crazygames.com            → normal proxy (NOT CloudMoon)
   //  - /example.com               → normal proxy (NOT CloudMoon)
-  //
-  // The old code set a 24-hour cookie on first CloudMoon visit, which caused
-  // ALL subsequent requests (even to non-CloudMoon sites) to be hijacked into
-  // CloudMoon mode. This stateless approach fixes that — each request is
-  // routed based on its own path, with no cross-request state.
   if (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/')) {
-    // First-time entry: redirect to the CloudMoon shell root and set a
-    // SHORT-LIVED session cookie (Max-Age=0 clears it when the browser closes,
-    // and it's only used for same-session CloudMoon internal navigation).
-    // The cookie is NOT persistent (no Max-Age > 0) so it doesn't survive a
-    // browser restart or affect non-CloudMoon requests in future sessions.
+    // First-time entry: set a 1-second cookie and redirect to the CloudMoon
+    // shell root. The cookie is just long enough to survive the redirect
+    // (so / is handled by CloudMoon, not "url not specified"), then expires.
     if (!hasCloudMoonCookie(request)) {
       const afterPath = pathname.slice(ENTER_PATH.length) || '/';
       return new Response(null, {
         status: 302,
         headers: {
           'Location': afterPath + url.search,
-          'Set-Cookie': `${COOKIE_NAME}=1; Path=/; SameSite=None; Secure`
+          'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=1; SameSite=None; Secure`
         }
       });
     }
-    // Already has the session cookie — handle as CloudMoon internal navigation
+    // Has the cookie — handle as CloudMoon
     return handleCloudMoonRequest(request);
   }
 
@@ -111,6 +108,14 @@ async function handleRequest(request) {
   // fall through to the normal proxy handling below. CloudMoon mode is NOT
   // triggered — routing is based on the path, not a cookie, so non-CloudMoon
   // sites always use the normal proxy even if a stale cookie exists.
+
+  // If the user has a CloudMoon cookie AND is loading "/" (the redirect target
+  // from the ENTER_PATH above), route to CloudMoon. This is the critical step:
+  // the 1-second cookie must be present when "/" loads so it shows the CloudMoon
+  // shell instead of "url not specified".
+  if ((pathname === '/' || pathname === '') && hasCloudMoonCookie(request)) {
+    return handleCloudMoonRequest(request);
+  }
 
   if (pathname === '/' || pathname === '') {
     return new Response('url not specified', {
