@@ -63,58 +63,38 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  // EXIT — clear any lingering cookie from the old persistent-cookie system.
-  // Kept for backwards compatibility (users who still have the old cookie).
+  // EXIT must be checked before the cookie check — its whole job is to escape
+  // CloudMoon mode, so it can't be swallowed by the "cookie set -> go to CloudMoon" rule.
   if (pathname === EXIT_PATH) {
     return new Response(null, {
       status: 302,
       headers: {
         'Location': '/',
-        'Set-Cookie': `${COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=None; Secure`
+        'Set-Cookie': `${COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax`
       }
     });
   }
 
-  // ── CloudMoon routing ──
-  // CloudMoon mode is triggered by the path /web.cloudmoonapp.com. We set a
-  // very short-lived cookie (1 second) just long enough for the redirect to
-  // land and the CloudMoon shell to establish its session. After 1 second the
-  // cookie expires naturally — it won't hijack future non-CloudMoon requests.
-  //
-  // Routing:
-  //  - /web.cloudmoonapp.com      → set 1s cookie, redirect to CloudMoon shell
-  //  - /web.cloudmoonapp.com/...  → CloudMoon internal navigation
-  //  - /crazygames.com            → normal proxy (NOT CloudMoon)
-  //  - /example.com               → normal proxy (NOT CloudMoon)
-  if (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/')) {
-    // First-time entry: set a 1-second cookie and redirect to the CloudMoon
-    // shell root. The cookie is just long enough to survive the redirect
-    // (so / is handled by CloudMoon, not "url not specified"), then expires.
-    if (!hasCloudMoonCookie(request)) {
-      const afterPath = pathname.slice(ENTER_PATH.length) || '/';
-      return new Response(null, {
-        status: 302,
-        headers: {
-          'Location': afterPath + url.search,
-          'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=1; SameSite=None; Secure`
-        }
-      });
-    }
-    // Has the cookie — handle as CloudMoon
+  // Cookie check comes next. If we're already in CloudMoon mode, every remaining
+  // path (including the shell's own internal "/web.cloudmoonapp.com/" iframe target)
+  // goes straight to handleCloudMoonRequest unmodified. Checking ENTER_PATH before
+  // this was the regression: it hijacked that internal path and redirected back to
+  // the shell instead of fetching real content, causing a whitescreen.
+  if (hasCloudMoonCookie(request)) {
     return handleCloudMoonRequest(request);
   }
 
-  // For ALL other paths (normal proxy sites like /crazygames.com, /example.com),
-  // fall through to the normal proxy handling below. CloudMoon mode is NOT
-  // triggered — routing is based on the path, not a cookie, so non-CloudMoon
-  // sites always use the normal proxy even if a stale cookie exists.
-
-  // If the user has a CloudMoon cookie AND is loading "/" (the redirect target
-  // from the ENTER_PATH above), route to CloudMoon. This is the critical step:
-  // the 1-second cookie must be present when "/" loads so it shows the CloudMoon
-  // shell instead of "url not specified".
-  if ((pathname === '/' || pathname === '') && hasCloudMoonCookie(request)) {
-    return handleCloudMoonRequest(request);
+  // ENTER only matters when there's no cookie yet — genuinely entering CloudMoon
+  // mode for the first time (or after a fresh browser/no cookies).
+  if (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/')) {
+    const afterPath = pathname.slice(ENTER_PATH.length) || '/';
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location': afterPath + url.search,
+        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=Lax`
+      }
+    });
   }
 
   if (pathname === '/' || pathname === '') {
@@ -337,14 +317,104 @@ async function proxyRequest(request, targetURL) {
     });
   }
 
-  removeAds();
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function() { removeAds(); });
+  function stripPopupTargets() {
+    document.querySelectorAll('a[target]').forEach(function(a) {
+      var t = a.getAttribute('target');
+      if (t && t.toLowerCase() !== '_self' && t.toLowerCase() !== '_parent') {
+        a.removeAttribute('target');
+      }
+    });
+    document.querySelectorAll('form[target]').forEach(function(f) {
+      var t = f.getAttribute('target');
+      if (t && t.toLowerCase() !== '_self' && t.toLowerCase() !== '_parent') {
+        f.removeAttribute('target');
+      }
+    });
   }
-  window.addEventListener("load", function() { removeAds(); });
-  setInterval(function() { removeAds(); }, 200);
 
-  var observer = new MutationObserver(function() { removeAds(); });
+  function toProxyPath(rawUrl) {
+    try {
+      var abs = new URL(rawUrl, window.location.href);
+      if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return rawUrl;
+      if (abs.origin === window.location.origin) return rawUrl;
+      if (abs.hostname === 'web.cloudmoonapp.com') {
+        return '/web.cloudmoonapp.com' + abs.pathname + abs.search + abs.hash;
+      }
+      return '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+    } catch (e) {
+      return rawUrl;
+    }
+  }
+
+  var origOpen = window.open;
+  window.open = function(u, t, f) {
+    if (u) {
+      var proxied = toProxyPath(u);
+      console.log('[Popup Intercepted -> redirecting current page]', proxied);
+      window.location.href = proxied;
+    }
+    return { closed: false, close: function(){}, focus: function(){}, blur: function(){} };
+  };
+
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el !== document.body && el.tagName !== 'A') {
+      el = el.parentElement;
+    }
+    if (el && el.tagName === 'A') {
+      var target = el.getAttribute('target');
+      var href = el.getAttribute('href') || el.href;
+      if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent' && href) {
+        e.preventDefault();
+        e.stopPropagation();
+        var proxied = toProxyPath(href);
+        console.log('[Link Redirect Intercepted -> redirecting current page]', proxied);
+        window.location.href = proxied;
+      }
+    }
+  }, true);
+
+  document.addEventListener('click', function() {
+    var startHref = window.location.href;
+    setTimeout(function() {
+      var nowHref = window.location.href;
+      if (nowHref !== startHref && nowHref.indexOf(window.location.origin) !== 0) {
+        try { window.stop(); } catch (e) {}
+        var proxied = toProxyPath(nowHref);
+        console.log('[Non-link Redirect Trapped -> correcting]', proxied);
+        window.location.href = proxied;
+      }
+    }, 0);
+  }, true);
+
+  var origAssign = Location.prototype.assign;
+  var origReplace = Location.prototype.replace;
+  try {
+    Location.prototype.assign = function(u) {
+      return origAssign.call(this, toProxyPath(u));
+    };
+    Location.prototype.replace = function(u) {
+      return origReplace.call(this, toProxyPath(u));
+    };
+  } catch (e) {}
+
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    var target = form.getAttribute && form.getAttribute('target');
+    if (target && target.toLowerCase() !== '_self' && target.toLowerCase() !== '_parent') {
+      form.removeAttribute('target');
+    }
+  }, true);
+
+  removeAds();
+  stripPopupTargets();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function() { removeAds(); stripPopupTargets(); });
+  }
+  window.addEventListener("load", function() { removeAds(); stripPopupTargets(); });
+  setInterval(function() { removeAds(); stripPopupTargets(); }, 200);
+
+  var observer = new MutationObserver(function() { removeAds(); stripPopupTargets(); });
   function startObserver() {
     if (document.body) {
       observer.observe(document.body, {
@@ -450,8 +520,12 @@ function getUniversalWrapper(targetURL) {
     <script>
         const targetURL = '${targetURL.replace(/'/g, "\\'")}';
         const SHADOW_LAYERS = 4;
-        const SANDBOX_ATTRS = 'allow-forms allow-modals allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock';
+        const SANDBOX_ATTRS = 'allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock';
         const ALLOW_PERMISSIONS = 'accelerometer; camera; encrypted-media; geolocation; gyroscope; hid; microphone; midi; clipboard-read; clipboard-write; xr-spatial-tracking; gamepad';
+
+        let currentIframe = null;
+        let lastGoodSrc = '/proxy/' + encodeURIComponent(targetURL);
+        let watchdogInterval = null;
 
         function createMultiLayerShadowFrame(url) {
             const frameContainer = document.getElementById('frame-container');
@@ -477,10 +551,51 @@ function getUniversalWrapper(targetURL) {
                     iframe.setAttribute('referrerpolicy', 'no-referrer-when-downgrade');
                     iframe.setAttribute('importance', 'high');
                     iframe.setAttribute('loading', 'eager');
-                    iframe.src = '/proxy/' + encodeURIComponent(url);
+                    const src = '/proxy/' + encodeURIComponent(url);
+                    iframe.src = src;
+                    lastGoodSrc = src;
                     shadowRoot.appendChild(iframe);
+                    currentIframe = iframe;
+                    startWatchdog();
                 }
             }
+        }
+
+        let blankSinceMs = null;
+        const BLANK_GRACE_MS = 600;
+
+        function startWatchdog() {
+            blankSinceMs = null;
+            if (watchdogInterval) return;
+            watchdogInterval = setInterval(() => {
+                if (!currentIframe) return;
+                let loc;
+                try {
+                    loc = currentIframe.contentWindow.location.href;
+                } catch (e) {
+                    console.warn('[Watchdog] iframe escaped to a non-hyperzproxy origin, resetting');
+                    currentIframe.src = lastGoodSrc;
+                    blankSinceMs = null;
+                    return;
+                }
+                if (loc === 'about:blank') {
+                    if (blankSinceMs === null) {
+                        blankSinceMs = Date.now();
+                    } else if (Date.now() - blankSinceMs > BLANK_GRACE_MS) {
+                        console.warn('[Watchdog] iframe stuck on about:blank (likely a blocked/refused load), resetting');
+                        currentIframe.src = lastGoodSrc;
+                        blankSinceMs = null;
+                    }
+                    return;
+                }
+                blankSinceMs = null;
+                if (loc.indexOf(window.location.origin) === 0) {
+                    lastGoodSrc = loc.slice(window.location.origin.length) || '/';
+                } else {
+                    console.warn('[Watchdog] iframe on a non-hyperzproxy URL, resetting:', loc);
+                    currentIframe.src = lastGoodSrc;
+                }
+            }, 50);
         }
 
         createMultiLayerShadowFrame(targetURL);
