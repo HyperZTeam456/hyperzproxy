@@ -70,7 +70,7 @@ async function handleRequest(request) {
       status: 302,
       headers: {
         'Location': '/',
-        'Set-Cookie': `${COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=Lax`
+        'Set-Cookie': `${COOKIE_NAME}=; Path=/; Max-Age=0; SameSite=None; Secure`
       }
     });
   }
@@ -92,7 +92,7 @@ async function handleRequest(request) {
       status: 302,
       headers: {
         'Location': afterPath + url.search,
-        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=Lax`
+        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=86400; SameSite=None; Secure`
       }
     });
   }
