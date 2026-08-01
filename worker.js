@@ -77,9 +77,11 @@ async function handleRequest(request) {
 
   // Cookie check comes next. If we're already in CloudMoon mode, every remaining
   // path (including the shell's own internal "/web.cloudmoonapp.com/" iframe target)
-  // goes straight to handleCloudMoonRequest unmodified. Checking ENTER_PATH before
-  // this was the regression: it hijacked that internal path and redirected back to
-  // the shell instead of fetching real content, causing a whitescreen.
+  // goes straight to handleCloudMoonRequest unmodified.
+  //
+  // The cookie uses SameSite=None; Secure (required for third-party iframe embedding)
+  // and Max-Age=5 (expires after 5 seconds — just long enough for the redirect to
+  // land, not long enough to hijack future non-CloudMoon requests).
   if (hasCloudMoonCookie(request)) {
     return handleCloudMoonRequest(request);
   }
