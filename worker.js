@@ -75,15 +75,32 @@ async function handleRequest(request) {
     });
   }
 
-  // Cookie check comes next. If we're already in CloudMoon mode, every remaining
-  // path (including the shell's own internal "/web.cloudmoonapp.com/" iframe target)
-  // goes straight to handleCloudMoonRequest unmodified.
+  // Cookie check: if we're in CloudMoon mode, route to CloudMoon — BUT ONLY
+  // for paths that are NOT a normal proxy target. A normal proxy target is a
+  // path that starts with a domain-like string (e.g. /crazygames.com,
+  // /example.com). CloudMoon internal paths are /, /proxy/, /_app/,
+  // /manifest.json, /sw.js, etc. — they don't look like domains.
   //
-  // The cookie uses SameSite=None; Secure (required for third-party iframe embedding)
-  // and Max-Age=5 (expires after 5 seconds — just long enough for the redirect to
-  // land, not long enough to hijack future non-CloudMoon requests).
+  // This prevents the CloudMoon cookie from hijacking non-CloudMoon sites
+  // (like /crazygames.com) even if the cookie hasn't expired yet.
   if (hasCloudMoonCookie(request)) {
-    return handleCloudMoonRequest(request);
+    // Check if the path looks like a domain (normal proxy target).
+    // A domain path starts with / followed by something like "example.com"
+    // — i.e. a dot in the first path segment, no leading underscore.
+    // Exception: /web.cloudmoonapp.com is the ENTER_PATH — always CloudMoon.
+    // Exception: known CloudMoon internal paths (manifest.json, sw.js) — CloudMoon.
+    var pathAfterSlash = pathname.slice(1);
+    var firstSeg = pathAfterSlash.split('/')[0];
+    var isEnterPath = pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/');
+    var isCloudMoonInternal = pathname === '/manifest.json' || pathname === '/sw.js' || firstSeg === 'proxy';
+    var looksLikeDomain = firstSeg.indexOf('.') !== -1 && !firstSeg.startsWith('_') && !isEnterPath && !isCloudMoonInternal;
+    if (!looksLikeDomain) {
+      // Not a domain — it's a CloudMoon internal path. Route to CloudMoon.
+      return handleCloudMoonRequest(request);
+    }
+    // Looks like a domain (and not ENTER_PATH or CloudMoon internal) — fall
+    // through to normal proxy, even with the cookie. This prevents CloudMoon
+    // from hijacking other sites.
   }
 
   // ENTER only matters when there's no cookie yet — genuinely entering CloudMoon
