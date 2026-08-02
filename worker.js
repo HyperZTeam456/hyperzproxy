@@ -6,6 +6,7 @@ addEventListener('fetch', event => {
 
 const COOKIE_NAME = 'cm_mode';
 const ENTER_PATH = '/web.cloudmoonapp.com';
+const CLOUDMOON_DOMAIN = 'web.cloudmoonapp.com';
 const EXIT_PATH = '/__leave-cloudmoon';
 
 const AD_PATTERNS = [
@@ -63,8 +64,7 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  // EXIT must be checked before the cookie check — its whole job is to escape
-  // CloudMoon mode, so it can't be swallowed by the "cookie set -> go to CloudMoon" rule.
+  // EXIT — clear CloudMoon cookie.
   if (pathname === EXIT_PATH) {
     return new Response(null, {
       status: 302,
@@ -75,44 +75,61 @@ async function handleRequest(request) {
     });
   }
 
-  // Cookie check: the CloudMoon cookie applies to CloudMoon's own paths
-  // (/web.cloudmoonapp.com, /, /_app/, /manifest.json, /sw.js) AND to /proxy/
-  // requests that target web.cloudmoonapp.com (CloudMoon's internal game loading).
-  // For /proxy/ requests targeting OTHER sites (like crazygames.com), the cookie
-  // is ignored and the normal proxy handles them. This lets CloudMoon games work
-  // while non-CloudMoon sites aren't hijacked.
+  // Helper: check if a path is a CloudMoon entry path.
+  // Accepts both /web.cloudmoonapp.com and /cloudmoonapp.com (with or without
+  // the web. prefix) since users may type either.
+  function isCloudMoonEnter(path) {
+    var cmPaths = [
+      '/web.cloudmoonapp.com',
+      '/cloudmoonapp.com'
+    ];
+    for (var i = 0; i < cmPaths.length; i++) {
+      if (path === cmPaths[i] || path.startsWith(cmPaths[i] + '/')) return true;
+    }
+    return false;
+  }
+
+  // Helper: check if a /proxy/ request targets cloudmoonapp.com.
+  function isProxyCloudMoon(path) {
+    if (!path.startsWith('/proxy/')) return false;
+    try {
+      var decoded = decodeURIComponent(path.substring('/proxy/'.length));
+      return decoded.indexOf('cloudmoonapp.com') !== -1;
+    } catch(e) { return false; }
+  }
+
+  // Cookie check: if we have a CloudMoon cookie, route CloudMoon-internal paths
+  // to CloudMoon. This includes /, /_app/, /manifest.json, /sw.js, the enter
+  // path, and /proxy/ requests targeting cloudmoonapp.com. For everything else
+  // (like /crazygames.com), ignore the cookie and use the normal proxy.
   if (hasCloudMoonCookie(request)) {
-    var isCloudMoonPath =
-      pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/') ||
+    var isCM =
+      isCloudMoonEnter(pathname) ||
       pathname === '/' || pathname === '' ||
       pathname.startsWith('/_app/') ||
-      pathname === '/manifest.json' || pathname === '/sw.js';
-
-    // For /proxy/ paths, check if the decoded target URL is for cloudmoonapp.com
-    if (!isCloudMoonPath && pathname.startsWith('/proxy/')) {
-      try {
-        var decodedProxyUrl = decodeURIComponent(pathname.substring('/proxy/'.length));
-        if (decodedProxyUrl.indexOf('cloudmoonapp.com') !== -1) {
-          isCloudMoonPath = true;
-        }
-      } catch(e) {}
-    }
-
-    if (isCloudMoonPath) {
+      pathname === '/manifest.json' || pathname === '/sw.js' ||
+      isProxyCloudMoon(pathname);
+    if (isCM) {
       return handleCloudMoonRequest(request);
     }
   }
 
-  // ENTER only matters when there's no cookie yet — genuinely entering CloudMoon
-  // mode for the first time (or after a fresh browser/no cookies).
-  if (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/')) {
-    const afterPath = pathname.slice(ENTER_PATH.length) || '/';
-    return new Response(null, {
-      status: 302,
-      headers: {
-        'Location': afterPath + url.search,
-        'Set-Cookie': `${COOKIE_NAME}=1; Path=/; Max-Age=5; SameSite=None; Secure`
-      }
+  // ENTER: when visiting /web.cloudmoonapp.com (or /cloudmoonapp.com) without
+  // a cookie, serve the CloudMoon shell HTML directly (the same HTML that / serves
+  // when in CloudMoon mode). No redirect — the shell loads immediately. We set
+  // a 60-second cookie so subsequent internal requests (/, /_app/, /proxy/) are
+  // routed to CloudMoon.
+  if (isCloudMoonEnter(pathname)) {
+    // Get the CloudMoon shell HTML (same as handleCloudMoonRequest does for /)
+    var shellRequest = new Request('https://' + request.headers.get('host') + '/', request);
+    var cmResponse = await handleCloudMoonRequest(shellRequest);
+    var cmBody = await cmResponse.text();
+    var cmHeaders = new Headers(cmResponse.headers);
+    cmHeaders.set('Set-Cookie', `${COOKIE_NAME}=1; Path=/; Max-Age=60; SameSite=None; Secure`);
+    return new Response(cmBody, {
+      status: cmResponse.status,
+      statusText: cmResponse.statusText,
+      headers: cmHeaders
     });
   }
 
