@@ -260,8 +260,15 @@ async function proxyDirectFetch(request, targetURL) {
   let html = await response.text();
   html = blockAdsInHTML(html);
 
-  // <base> tag so relative URLs resolve against the original site
-  html = injectInHead(html, '<base href="' + targetURL + '">');
+  // <base> tag pointing to the PROXY origin + target domain, so relative URLs
+  // like /games resolve to /crazygames.com/games (through the proxy) instead of
+  // https://crazygames.com/games (direct, which would escape the proxy).
+  var targetURLObj = new URL(targetURL);
+  var basePath = '/' + targetURLObj.hostname + targetURLObj.pathname;
+  // Remove trailing filename (keep directory path)
+  if (basePath.lastIndexOf('/') > 0) basePath = basePath.slice(0, basePath.lastIndexOf('/') + 1);
+  else basePath = basePath + '/';
+  html = injectInHead(html, '<base href="' + basePath + '">');
 
   // Sandbox: prevents the page from escaping the proxy
   html = injectInHead(html, SANDBOX_SCRIPT);
@@ -321,7 +328,10 @@ const SANDBOX_SCRIPT = `<script>
   // Helper: rewrite any URL to stay inside the proxy
   function rewriteUrl(url) {
     if (!url || typeof url !== 'string') return url;
-    if (url.startsWith('/') || url.startsWith('#') || url.startsWith(PROXY_ORIGIN) ||
+    // Already a proxy path (starts with /domain.com/ or /domain.com)
+    // Don't rewrite if it starts with / followed by something that has a dot
+    if (url.startsWith('/') && !url.startsWith('//')) return url;
+    if (url.startsWith('#') || url.startsWith(PROXY_ORIGIN) ||
         url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') ||
         url.startsWith('mailto:') || url.startsWith('tel:') || url.startsWith('about:')) {
       return url;
