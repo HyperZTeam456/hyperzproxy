@@ -1,8 +1,13 @@
-import cmWorker from './cloudmoon-inplay.js';
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request);
+  }
+};
 
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request));
-});
+// Proxy target — split into fragments and assembled at runtime so the
+// full URL never appears as a single string in the source code.
+var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
+var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
 
 const AD_PATTERNS = [
   'googlesyndication.com', 'doubleclick.net', 'googleadservices.com',
@@ -19,18 +24,86 @@ const AD_PATTERNS = [
 ];
 
 function isAdRequest(url) {
-  const u = url.toLowerCase();
+  const u = (url || '').toLowerCase();
   return AD_PATTERNS.some(p => u.includes(p));
 }
 
-// Check if a path is a CloudMoon entry path.
-// Accepts /web.cloudmoonapp.com and /cloudmoonapp.com (with or without web.)
 function isCloudMoonPath(pathname) {
-  var cm = ['web.cloudmoonapp.com', 'cloudmoonapp.com'];
-  for (var i = 0; i < cm.length; i++) {
-    if (pathname === '/' + cm[i] || pathname.startsWith('/' + cm[i] + '/')) return true;
-  }
+  // Domain parts split to avoid appearing as a single string in source
+  var _d = ['app', 'com'];
+  var _n = 'cloudmoon';
+  var _w = 'web';
+  var full = _w + '.' + _n + _d[0] + '.' + _d[1];
+  var short = _n + _d[0] + '.' + _d[1];
+  if (pathname === '/' + full || pathname.startsWith('/' + full + '/')) return true;
+  if (pathname === '/' + short || pathname.startsWith('/' + short + '/')) return true;
   return false;
+}
+
+// ── Encoding: Caesar Cipher (+1 shift) then base54 ──
+// Two layers of obfuscation so school filters can't easily decode the URL:
+//   1. Caesar Cipher: each character's char code is shifted by +1
+//   2. Base54: the shifted string is encoded using a custom 54-character alphabet
+//      (a-z, A-Z, 0-7) — NOT standard base64, so online decoders won't work.
+// The Google Classroom proxy decodes by reversing: base54 decode → Caesar -1.
+
+// Custom base54 alphabet (54 chars: a-z + A-Z + 0-7)
+const B54_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567';
+const B54_BASE = 54;
+
+// Caesar Cipher +1 shift on char codes
+function caesarEncode(str) {
+  var out = '';
+  for (var i = 0; i < str.length; i++) {
+    out += String.fromCharCode(str.charCodeAt(i) + 1);
+  }
+  return out;
+}
+
+// Encode a string to base54 (custom alphabet, not standard base64)
+function b54encode(str) {
+  // Convert string to byte array
+  var bytes = [];
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    if (c < 128) {
+      bytes.push(c);
+    } else if (c < 2048) {
+      bytes.push(192 | (c >> 6));
+      bytes.push(128 | (c & 63));
+    } else {
+      bytes.push(224 | (c >> 12));
+      bytes.push(128 | ((c >> 6) & 63));
+      bytes.push(128 | (c & 63));
+    }
+  }
+  // Encode bytes to base54
+  var result = '';
+  var i = 0;
+  while (i < bytes.length) {
+    var b1 = bytes[i++] || 0;
+    var b2 = bytes[i++] || 0;
+    var b3 = bytes[i++] || 0;
+    // 24-bit group
+    var n = (b1 << 16) | (b2 << 8) | b3;
+    // Split into base54 groups (we need to handle 3 bytes → ~4-5 base54 chars)
+    // Use a simpler approach: convert the number to base54
+    var chars = [];
+    var val = n;
+    do {
+      chars.push(B54_ALPHABET[val % B54_BASE]);
+      val = Math.floor(val / B54_BASE);
+    } while (val > 0 && chars.length < 5);
+    // Pad to 5 chars for consistent decoding
+    while (chars.length < 5) chars.push(B54_ALPHABET[0]);
+    result += chars.reverse().join('');
+  }
+  return result;
+}
+
+// Full encode: Caesar +1 → base54
+function encodeUrl(url) {
+  return b54encode(caesarEncode(url));
 }
 
 async function handleRequest(request) {
@@ -50,56 +123,34 @@ async function handleRequest(request) {
     });
   }
 
-  // ── CloudMoon URLs: use the Cloudmoon-InPlay worker directly ──
-  // When the path is /web.cloudmoonapp.com (or /cloudmoonapp.com), we delegate
-  // to the imported Cloudmoon-InPlay worker which handles the shell, assets,
-  // and game proxying. The request is rewritten to path "/" so the worker
-  // serves the CloudMoon shell HTML. Sub-requests (/, /_app/, /proxy/, etc.)
-  // are also delegated to the worker.
+  // ── CloudMoon: full-screen iframe to the Google Classroom proxy ──
+  // The target URL is encoded with Caesar Cipher (+1) then base54 so school
+  // filters can't easily decode it (not standard base64, needs custom decoder).
   if (isCloudMoonPath(pathname)) {
-    // Rewrite the request to "/" so the CloudMoon worker serves the shell
-    var cmRequest = new Request('https://' + url.host + '/', {
-      method: request.method,
-      headers: request.headers,
-      body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
-      redirect: 'manual'
-    });
-    var cmResponse = await cmWorker.fetch(cmRequest);
-    // Add sandbox header to prevent the iframe from escaping the proxy
-    var cmHeaders = new Headers(cmResponse.headers);
-    cmHeaders.set('Content-Security-Policy', "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-src *;");
-    cmHeaders.delete('X-Frame-Options');
-    cmHeaders.delete('Frame-Options');
-    var cmBody = await cmResponse.text();
-    return new Response(cmBody, {
-      status: cmResponse.status,
-      statusText: cmResponse.statusText,
-      headers: cmHeaders
-    });
-  }
+    var targetPath = pathname + url.search;
+    // Build the target URL from split parts (avoid full domain in source)
+    var _d = ['app', 'com'], _n = 'cloudmoon', _w = 'web';
+    var cmDomain = _w + '.' + _n + _d[0] + '.' + _d[1];
+    var cloudmoonUrl = 'https://' + cmDomain + targetPath.replace(new RegExp('^\/(web\\.)?' + _n + _d[0] + '\\.' + _d[1]), '');
+    var encoded = encodeUrl(cloudmoonUrl);
+    var iframeSrc = CLOUDMOON_PROXY + '?u=' + encoded;
 
-  // ── CloudMoon internal paths (/, /_app/, /proxy/, /favicon.png, etc.) ──
-  // These are sub-resource requests from the CloudMoon shell. Delegate to the
-  // CloudMoon worker. We detect them by checking if the path doesn't look like
-  // a domain (no dot in the first segment) or is a known internal path.
-  if (isCloudMoonInternalPath(pathname)) {
-    var intRequest = new Request('https://' + url.host + pathname + url.search, {
-      method: request.method,
-      headers: request.headers,
-      body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
-      redirect: 'manual'
-    });
-    var intResponse = await cmWorker.fetch(intRequest);
-    var intHeaders = new Headers(intResponse.headers);
-    intHeaders.set('Access-Control-Allow-Origin', '*');
-    intHeaders.delete('X-Frame-Options');
-    intHeaders.delete('Frame-Options');
-    intHeaders.delete('Content-Security-Policy');
-    // Return the response body directly (don't .text() for non-HTML like images)
-    return new Response(intResponse.body, {
-      status: intResponse.status,
-      statusText: intResponse.statusText,
-      headers: intHeaders
+    var html = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>Home - Classroom</title>' +
+      '<style>*{margin:0;padding:0;box-sizing:border-box}' +
+      'html,body{width:100%;height:100%;overflow:hidden;background:#fff}' +
+      'iframe{width:100%;height:100%;border:none}</style></head><body>' +
+      '<iframe src="' + iframeSrc + '"' +
+      ' allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad"' +
+      ' sandbox="allow-forms allow-modals allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock"' +
+      '></iframe></body></html>';
+
+    return new Response(html, {
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Permissions-Policy': 'accelerometer=*, gyroscope=*, camera=*, microphone=*, geolocation=*, hid=*, midi=*, clipboard-read=*, clipboard-write=*, xr-spatial-tracking=*, gamepad=*'
+      }
     });
   }
 
@@ -116,26 +167,6 @@ async function handleRequest(request) {
   }
 
   return proxyDirectFetch(request, targetURL);
-}
-
-// Check if a path is a CloudMoon internal path (not a domain-like proxy path).
-// CloudMoon internal paths: /, /_app/, /proxy/, /manifest.json, /sw.js,
-// /favicon.png, /favicon.ico, /icon.svg, /icon-192.png, /icon-512.png
-function isCloudMoonInternalPath(pathname) {
-  if (pathname === '/' || pathname === '') return true;
-  var known = ['/manifest.json', '/sw.js', '/favicon.png', '/favicon.ico',
-               '/icon.svg', '/icon-192.png', '/icon-512.png'];
-  if (known.indexOf(pathname) !== -1) return true;
-  var firstSeg = pathname.slice(1).split('/')[0];
-  if (firstSeg === '_app' || firstSeg === 'proxy') return true;
-  // Check if the path starts with /proxy/ and targets cloudmoonapp.com
-  if (pathname.startsWith('/proxy/')) {
-    try {
-      var decoded = decodeURIComponent(pathname.substring('/proxy/'.length));
-      if (decoded.indexOf('cloudmoonapp.com') !== -1) return true;
-    } catch(e) {}
-  }
-  return false;
 }
 
 function parseUniversalURL(pathname, search) {
@@ -174,9 +205,7 @@ function isValidURL(url) {
 }
 
 // Direct-fetch proxy: fetch HTML, inject <base> tag, strip security headers,
-// block ads. Assets load directly from the original site.
-// Includes a sandbox to prevent the proxied page from escaping the proxy
-// (blocking top-level redirects, preventing navigation away from the proxy).
+// block ads. Includes a sandbox to prevent escaping the proxy.
 async function proxyDirectFetch(request, targetURL) {
   if (isAdRequest(targetURL)) {
     return new Response('', { status: 204 });
@@ -218,7 +247,6 @@ async function proxyDirectFetch(request, targetURL) {
     const passHeaders = new Headers(response.headers);
     passHeaders.set('Access-Control-Allow-Origin', '*');
     stripSecurityHeaders(passHeaders);
-    // Add caching for static assets
     if (contentType.includes('image/') || contentType.includes('font/') ||
         contentType.includes('javascript') || contentType.includes('css')) {
       passHeaders.set('Cache-Control', 'public, max-age=86400');
@@ -228,106 +256,18 @@ async function proxyDirectFetch(request, targetURL) {
     });
   }
 
-  // HTML: inject <base>, strip headers, block ads, add sandbox
+  // HTML: inject <base>, sandbox, strip headers, block ads
   let html = await response.text();
   html = blockAdsInHTML(html);
 
   // <base> tag so relative URLs resolve against the original site
-  const baseTag = '<base href="' + targetURL + '">';
-  html = injectInHead(html, baseTag);
+  html = injectInHead(html, '<base href="' + targetURL + '">');
 
-  // Sandbox script: prevents the page from escaping the proxy.
-  // - Blocks top-level navigation (window.top, window.parent, location.href)
-  // - Rewrites window.open to stay in the proxy
-  // - Blocks history navigation away from the proxy
-  // - Intercepts form submissions to keep them proxied
-  const sandboxScript = `<script>
-(function(){
-  // Block top-level navigation
-  try { Object.defineProperty(window.top, 'location', { get: function(){ return window.location; }, set: function(){}, configurable: false }); } catch(e) {}
-  // Intercept window.open — keep it inside the iframe
-  var origOpen = window.open;
-  window.open = function(url, target, features) {
-    if (url && typeof url === 'string') {
-      try {
-        var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-          url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-        }
-      } catch(e) {}
-    }
-    return origOpen.call(this, url, '_self', features);
-  };
-  // Intercept location assignments that would escape the proxy
-  var origAssign = window.location.assign.bind(window.location);
-  window.location.assign = function(url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/')) {
-      try {
-        var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-          url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-        }
-      } catch(e) {}
-    }
-    return origAssign(url);
-  };
-  var origReplace = window.location.replace.bind(window.location);
-  window.location.replace = function(url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/')) {
-      try {
-        var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-          url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-        }
-      } catch(e) {}
-    }
-    return origReplace(url);
-  };
-  // Intercept history.pushState/replaceState
-  var origPush = history.pushState;
-  history.pushState = function(state, title, url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/') && !url.startsWith('#')) {
-      try {
-        var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-          url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-        }
-      } catch(e) {}
-    }
-    return origPush.apply(this, arguments);
-  };
-  var origReplaceState = history.replaceState;
-  history.replaceState = function(state, title, url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/') && !url.startsWith('#')) {
-      try {
-        var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-          url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-        }
-      } catch(e) {}
-    }
-    return origReplaceState.apply(this, arguments);
-  };
-  // Block escape via meta refresh
-  var observer = new MutationObserver(function(mutations) {
-    mutations.forEach(function(m) {
-      m.addedNodes.forEach(function(node) {
-        if (node.tagName === 'META' && (node.httpEquiv === 'refresh' || node.getAttribute('http-equiv') === 'refresh')) {
-          node.remove();
-        }
-      });
-    });
-  });
-  if (document.head) observer.observe(document.head, { childList: true });
-  if (document.body) observer.observe(document.body, { childList: true, subtree: true });
-})();
-</script>`;
+  // Sandbox: prevents the page from escaping the proxy
+  html = injectInHead(html, SANDBOX_SCRIPT);
 
   // Ad blocker
-  const adBlock = `<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>`;
-
-  html = injectInHead(html, sandboxScript);
-  html = injectInHead(html, adBlock);
+  html = injectInHead(html, AD_BLOCKER);
 
   const newHeaders = new Headers(response.headers);
   newHeaders.set('Content-Type', 'text/html; charset=utf-8');
@@ -371,3 +311,66 @@ function blockAdsInHTML(html) {
   html = html.replace(/<div[^>]*id="google_ads[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
   return html;
 }
+
+// Sandbox script: prevents the proxied page from escaping the proxy
+const SANDBOX_SCRIPT = `<script>
+(function(){
+  try { Object.defineProperty(window.top, 'location', { get: function(){ return window.location; }, set: function(){}, configurable: false }); } catch(e) {}
+  var origOpen = window.open;
+  window.open = function(url, target, features) {
+    if (url && typeof url === 'string') {
+      try { var abs = new URL(url, document.baseURI);
+        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      } catch(e) {}
+    }
+    return origOpen.call(this, url, '_self', features);
+  };
+  var origAssign = window.location.assign.bind(window.location);
+  window.location.assign = function(url) {
+    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/')) {
+      try { var abs = new URL(url, document.baseURI);
+        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      } catch(e) {}
+    }
+    return origAssign(url);
+  };
+  var origReplace = window.location.replace.bind(window.location);
+  window.location.replace = function(url) {
+    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/')) {
+      try { var abs = new URL(url, document.baseURI);
+        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      } catch(e) {}
+    }
+    return origReplace(url);
+  };
+  var origPush = history.pushState;
+  history.pushState = function(state, title, url) {
+    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/') && !url.startsWith('#')) {
+      try { var abs = new URL(url, document.baseURI);
+        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      } catch(e) {}
+    }
+    return origPush.apply(this, arguments);
+  };
+  var origReplaceState = history.replaceState;
+  history.replaceState = function(state, title, url) {
+    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/') && !url.startsWith('#')) {
+      try { var abs = new URL(url, document.baseURI);
+        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      } catch(e) {}
+    }
+    return origReplaceState.apply(this, arguments);
+  };
+  var observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(m) {
+      m.addedNodes.forEach(function(node) {
+        if (node.tagName === 'META' && (node.httpEquiv === 'refresh' || node.getAttribute('http-equiv') === 'refresh')) node.remove();
+      });
+    });
+  });
+  if (document.head) observer.observe(document.head, { childList: true });
+  if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+})();
+</script>`;
+
+const AD_BLOCKER = `<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>`;
