@@ -116,15 +116,16 @@ async function handleRequest(request) {
   }
 
   // Cookie check: if we have a CloudMoon cookie, route CloudMoon-internal paths
-  // to CloudMoon. This includes /, /_app/, /manifest.json, /sw.js, the enter
-  // path, and /proxy/ requests targeting cloudmoonapp.com. For everything else
-  // (like /crazygames.com), ignore the cookie and use the normal proxy.
+  // to CloudMoon. This includes /, /_app/, /manifest.json, /sw.js, /favicon.png,
+  // /favicon.ico, the enter path, and /proxy/ requests targeting cloudmoonapp.com.
+  // For everything else (like /crazygames.com), ignore the cookie and use the normal proxy.
   if (hasCloudMoonCookie(request)) {
     var isCM =
       isCloudMoonEnter(pathname) ||
       pathname === '/' || pathname === '' ||
       pathname.startsWith('/_app/') ||
       pathname === '/manifest.json' || pathname === '/sw.js' ||
+      pathname === '/favicon.png' || pathname === '/favicon.ico' ||
       isProxyCloudMoon(pathname);
     if (isCM) {
       return handleCloudMoonRequest(request);
@@ -132,12 +133,19 @@ async function handleRequest(request) {
   }
 
   // ── Cookie-less CloudMoon routing ──
-  // /proxy/ requests targeting cloudmoonapp.com MUST always go through
-  // handleCloudMoonRequest, even without the cookie. Otherwise the cookie
-  // expiring (60s) mid-session would cause CloudMoon asset requests to fall
-  // through to proxyRequest, which injects aggressive URL rewriting that breaks
-  // CloudMoon's SPA JavaScript.
-  if (isProxyCloudMoon(pathname)) {
+  // These paths MUST always go through handleCloudMoonRequest, even without the
+  // cookie, because they're CloudMoon internal assets that load before/during
+  // the cookie being set, or after it expires:
+  //  - /proxy/ requests targeting cloudmoonapp.com (game loading)
+  //  - /favicon.png, /favicon.ico (site icon — loads immediately)
+  //  - /_app/ (Svelte/SvelteKit JS/CSS assets — load immediately with the shell)
+  //  - /manifest.json, /sw.js (PWA assets)
+  // Without this, these requests fall through to proxyRequest/parseUniversalURL
+  // which returns HTML instead of the actual asset, breaking the CloudMoon UI.
+  if (isProxyCloudMoon(pathname) ||
+      pathname === '/favicon.png' || pathname === '/favicon.ico' ||
+      pathname.startsWith('/_app/') ||
+      pathname === '/manifest.json' || pathname === '/sw.js') {
     return handleCloudMoonRequest(request);
   }
 
