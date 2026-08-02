@@ -231,8 +231,15 @@ async function handleRequest(request) {
   //   - allow-same-origin → the iframe can access its own DOM
   //   - allow-downloads → downloads work
   // The iframe content is injected via srcdoc (same-origin, no network needed).
-  // Encode the page HTML as base64 to avoid HTML injection issues in srcdoc.
-  var encodedPage = btoa(unescape(encodeURIComponent(pageHtml)));
+
+  // Build the srcdoc attribute — HTML-escape the page content so it can be
+  // embedded as an attribute value. This avoids btoa/atob (not available in
+  // Workers runtime) and is simpler/more reliable.
+  var srcdocContent = pageHtml
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 
   var wrapperHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1">' +
@@ -240,13 +247,11 @@ async function handleRequest(request) {
     '<style>*{margin:0;padding:0;box-sizing:border-box}' +
     'html,body{width:100%;height:100%;overflow:hidden;background:#fff}' +
     'iframe{width:100%;height:100%;border:none}</style></head><body>' +
-    '<iframe id="p" sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-pointer-lock allow-modals allow-presentation"' +
+    '<iframe id="p" srcdoc="' + srcdocContent + '"' +
+    ' sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-pointer-lock allow-modals allow-presentation"' +
     ' allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad"' +
     ' style="width:100%;height:100%;border:none"></iframe>' +
-    '<script>' +
-    'var d=document.getElementById("p").contentDocument;' +
-    'd.open();d.write(decodeURIComponent(escape(atob("' + encodedPage + '"))));d.close();' +
-    '</script></body></html>';
+    '</body></html>';
 
   var wrapperHeaders = new Headers(fetchResponse.headers);
   wrapperHeaders.set('Content-Type', 'text/html; charset=utf-8');
