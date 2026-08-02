@@ -75,15 +75,16 @@ async function handleRequest(request) {
     });
   }
 
-  // Cookie check: the CloudMoon cookie ONLY applies to /web.cloudmoonapp.com
-  // paths and CloudMoon internal paths (/, /proxy/, /_app/, /manifest.json,
-  // /sw.js). For ANY other path (like /crazygames.com, /example.com), ignore
-  // the cookie entirely and fall through to the normal proxy. This prevents
-  // the CloudMoon cookie from hijacking non-CloudMoon sites.
+  // Cookie check: the CloudMoon cookie ONLY applies to CloudMoon's own
+  // paths: /web.cloudmoonapp.com, /, /_app/, /manifest.json, /sw.js.
+  // For ANY other path (including /proxy/ which is used by the universal
+  // wrapper for ALL sites), ignore the cookie and fall through to the normal
+  // proxy. This prevents the CloudMoon cookie from hijacking non-CloudMoon
+  // sites AND prevents /proxy/ requests from being misrouted to CloudMoon.
   if (hasCloudMoonCookie(request) &&
       (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/') ||
        pathname === '/' || pathname === '' ||
-       pathname.startsWith('/proxy/') || pathname.startsWith('/_app/') ||
+       pathname.startsWith('/_app/') ||
        pathname === '/manifest.json' || pathname === '/sw.js')) {
     return handleCloudMoonRequest(request);
   }
