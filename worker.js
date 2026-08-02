@@ -152,13 +152,120 @@ async function handleRequest(request) {
     });
   }
 
-  // ── Normal proxy: direct-fetch + <base> tag ──
+  // ── Normal proxy: direct-fetch + iframe sandbox ──
   const targetURL = parseUniversalURL(pathname, url.search);
   if (!targetURL || !isValidURL(targetURL)) {
     return new Response('Invalid URL', { status: 400 });
   }
 
-  return proxyDirectFetch(request, targetURL);
+  // Fetch the target HTML server-side
+  if (isAdRequest(targetURL)) {
+    return new Response('', { status: 204 });
+  }
+
+  const fetchHeaders = new Headers();
+  fetchHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+  var targetURLObj = new URL(targetURL);
+  fetchHeaders.set('Host', targetURLObj.host);
+  fetchHeaders.set('Referer', targetURLObj.origin + '/');
+
+  var fetchResponse;
+  try {
+    fetchResponse = await fetch(targetURL, { method: 'GET', headers: fetchHeaders, redirect: 'manual' });
+  } catch(error) {
+    return new Response('Failed to fetch: ' + error.message, { status: 502 });
+  }
+
+  // Handle redirects: rewrite Location to go through the proxy
+  if ([301, 302, 303, 307, 308].includes(fetchResponse.status)) {
+    var loc = fetchResponse.headers.get('Location');
+    if (loc) {
+      try {
+        var absLoc = new URL(loc, targetURL);
+        var proxyLoc = '/' + absLoc.hostname + absLoc.pathname + absLoc.search + absLoc.hash;
+        var redirHeaders = new Headers(fetchResponse.headers);
+        redirHeaders.set('Location', proxyLoc);
+        redirHeaders.set('Access-Control-Allow-Origin', '*');
+        stripSecurityHeaders(redirHeaders);
+        return new Response(null, { status: fetchResponse.status, headers: redirHeaders });
+      } catch(e) {}
+    }
+  }
+
+  var ct = (fetchResponse.headers.get('Content-Type') || '').toLowerCase();
+
+  // Non-HTML: pass through with CORS + security header stripping
+  if (!ct.includes('text/html')) {
+    var passHeaders = new Headers(fetchResponse.headers);
+    passHeaders.set('Access-Control-Allow-Origin', '*');
+    stripSecurityHeaders(passHeaders);
+    if (ct.includes('image/') || ct.includes('font/') ||
+        ct.includes('javascript') || ct.includes('css')) {
+      passHeaders.set('Cache-Control', 'public, max-age=86400');
+    }
+    return new Response(fetchResponse.body, {
+      status: fetchResponse.status, statusText: fetchResponse.statusText, headers: passHeaders
+    });
+  }
+
+  // HTML: fetch, clean, inject <base> pointing to the REAL site (so assets
+  // load directly), then wrap the entire page in a sandboxed iframe that
+  // BLOCKS all top-level navigation. The iframe sandbox attribute is the
+  // real sandbox — no JavaScript interception needed.
+  var pageHtml = await fetchResponse.text();
+  pageHtml = blockAdsInHTML(pageHtml);
+
+  // <base> tag pointing to the REAL site so all assets (img, script, css)
+  // load directly from the original server. No URL rewriting needed.
+  pageHtml = injectInHead(pageHtml, '<base href="' + targetURL + '">');
+
+  // Ad blocker (inside the iframe content)
+  pageHtml = injectInHead(pageHtml, AD_BLOCKER);
+
+  // Build a wrapper page that contains the proxied HTML in a sandboxed iframe.
+  // The sandbox attribute is the REAL sandbox:
+  //   - NO allow-top-navigation → blocks all top-level navigation
+  //   - NO allow-popups → blocks window.open
+  //   - allow-scripts → JS runs inside the iframe
+  //   - allow-forms → forms work
+  //   - allow-same-origin → the iframe can access its own DOM
+  //   - allow-downloads → downloads work
+  // The iframe content is injected via srcdoc (same-origin, no network needed).
+  // Encode the page HTML as base64 to avoid HTML injection issues in srcdoc.
+  var encodedPage = btoa(unescape(encodeURIComponent(pageHtml)));
+
+  var wrapperHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+    '<title>' + targetURLObj.hostname + '</title>' +
+    '<style>*{margin:0;padding:0;box-sizing:border-box}' +
+    'html,body{width:100%;height:100%;overflow:hidden;background:#fff}' +
+    'iframe{width:100%;height:100%;border:none}</style></head><body>' +
+    '<iframe id="p" sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-pointer-lock allow-modals allow-presentation"' +
+    ' allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad"' +
+    ' style="width:100%;height:100%;border:none"></iframe>' +
+    '<script>' +
+    'var d=document.getElementById("p").contentDocument;' +
+    'd.open();d.write(decodeURIComponent(escape(atob("' + encodedPage + '"))));d.close();' +
+    '</script></body></html>';
+
+  var wrapperHeaders = new Headers(fetchResponse.headers);
+  wrapperHeaders.set('Content-Type', 'text/html; charset=utf-8');
+  wrapperHeaders.set('Access-Control-Allow-Origin', '*');
+  // CSP: only allow the proxy origin + the target site
+  wrapperHeaders.set('Content-Security-Policy',
+    "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+    "frame-src 'self'; " +
+    "navigate-to 'self'");
+  stripSecurityHeaders(wrapperHeaders);
+  // Re-add our CSP (stripSecurityHeaders deleted it)
+  wrapperHeaders.set('Content-Security-Policy',
+    "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
+    "frame-src 'self'; " +
+    "navigate-to 'self'");
+
+  return new Response(wrapperHtml, {
+    status: fetchResponse.status, statusText: fetchResponse.statusText, headers: wrapperHeaders
+  });
 }
 
 function parseUniversalURL(pathname, search) {
@@ -195,299 +302,6 @@ function parseUniversalURL(pathname, search) {
 function isValidURL(url) {
   try { new URL(url); return true; } catch(e) { return false; }
 }
-
-// Direct-fetch proxy: fetch HTML, inject <base> tag, strip security headers,
-// block ads. Includes a sandbox to prevent escaping the proxy.
-async function proxyDirectFetch(request, targetURL) {
-  if (isAdRequest(targetURL)) {
-    return new Response('', { status: 204 });
-  }
-
-  const headers = new Headers();
-  headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
-  const targetURLObj = new URL(targetURL);
-  headers.set('Host', targetURLObj.host);
-  headers.set('Referer', targetURLObj.origin + '/');
-
-  let response;
-  try {
-    response = await fetch(targetURL, { method: 'GET', headers, redirect: 'manual' });
-  } catch(error) {
-    return new Response('Failed to fetch: ' + error.message, { status: 502 });
-  }
-
-  // Handle redirects: rewrite Location to go through the proxy
-  if ([301, 302, 303, 307, 308].includes(response.status)) {
-    const location = response.headers.get('Location');
-    if (location) {
-      try {
-        const absLocation = new URL(location, targetURL);
-        const proxyLocation = '/' + absLocation.hostname + absLocation.pathname + absLocation.search + absLocation.hash;
-        const redirectHeaders = new Headers(response.headers);
-        redirectHeaders.set('Location', proxyLocation);
-        redirectHeaders.set('Access-Control-Allow-Origin', '*');
-        stripSecurityHeaders(redirectHeaders);
-        return new Response(null, { status: response.status, headers: redirectHeaders });
-      } catch(e) {}
-    }
-  }
-
-  const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
-
-  // Non-HTML: pass through with CORS + security header stripping
-  if (!contentType.includes('text/html')) {
-    const passHeaders = new Headers(response.headers);
-    passHeaders.set('Access-Control-Allow-Origin', '*');
-    stripSecurityHeaders(passHeaders);
-    if (contentType.includes('image/') || contentType.includes('font/') ||
-        contentType.includes('javascript') || contentType.includes('css')) {
-      passHeaders.set('Cache-Control', 'public, max-age=86400');
-    }
-    return new Response(response.body, {
-      status: response.status, statusText: response.statusText, headers: passHeaders
-    });
-  }
-
-  // HTML: inject <base>, sandbox, strip headers, block ads
-  let html = await response.text();
-  html = blockAdsInHTML(html);
-
-  // <base> tag pointing to the PROXY origin + target domain, so relative URLs
-  // like /games resolve to /crazygames.com/games (through the proxy) instead of
-  // https://crazygames.com/games (direct, which would escape the proxy).
-  var basePath = '/' + targetURLObj.hostname + targetURLObj.pathname;
-  // Remove trailing filename (keep directory path)
-  if (basePath.lastIndexOf('/') > 0) basePath = basePath.slice(0, basePath.lastIndexOf('/') + 1);
-  else basePath = basePath + '/';
-  html = injectInHead(html, '<base href="' + basePath + '">');
-
-  // Sandbox: prevents the page from escaping the proxy
-  html = injectInHead(html, SANDBOX_SCRIPT);
-
-  // Ad blocker
-  html = injectInHead(html, AD_BLOCKER);
-
-  const newHeaders = new Headers(response.headers);
-  newHeaders.set('Content-Type', 'text/html; charset=utf-8');
-  newHeaders.set('Access-Control-Allow-Origin', '*');
-  stripSecurityHeaders(newHeaders);
-
-  return new Response(html, {
-    status: response.status, statusText: response.statusText, headers: newHeaders
-  });
-}
-
-function stripSecurityHeaders(h) {
-  h.delete('Content-Security-Policy');
-  h.delete('Content-Security-Policy-Report-Only');
-  h.delete('X-Frame-Options');
-  h.delete('Frame-Options');
-  h.delete('X-Content-Type-Options');
-  h.delete('Strict-Transport-Security');
-  h.delete('Cross-Origin-Embedder-Policy');
-  h.delete('Cross-Origin-Opener-Policy');
-  h.delete('Cross-Origin-Resource-Policy');
-  h.delete('Permissions-Policy');
-}
-
-function injectInHead(html, content) {
-  var headMatch = html.match(/<head[^>]*>/i);
-  if (headMatch) return html.replace(headMatch[0], headMatch[0] + content);
-  if (html.includes('</head>')) return html.replace('</head>', content + '</head>');
-  return content + html;
-}
-
-function blockAdsInHTML(html) {
-  html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*google-analytics[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*googletagmanager[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*doubleclick[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<iframe[^>]*googlesyndication[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<iframe[^>]*doubleclick[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi, '');
-  html = html.replace(/<div[^>]*id="google_ads[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
-  return html;
-}
-
-// Sandbox script: prevents the proxied page from escaping the proxy in ANY way.
-// Intercepts every known navigation method and rewrites URLs to stay proxied.
-const SANDBOX_SCRIPT = `<script>
-(function(){
-  var PROXY_ORIGIN = location.origin;
-
-  // Helper: rewrite any URL to stay inside the proxy
-  function rewriteUrl(url) {
-    if (!url || typeof url !== 'string') return url;
-    // Already a proxy path (starts with /domain.com/ or /domain.com)
-    // Don't rewrite if it starts with / followed by something that has a dot
-    if (url.startsWith('/') && !url.startsWith('//')) return url;
-    if (url.startsWith('#') || url.startsWith(PROXY_ORIGIN) ||
-        url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') ||
-        url.startsWith('mailto:') || url.startsWith('tel:') || url.startsWith('about:')) {
-      return url;
-    }
-    try {
-      var abs = new URL(url, document.baseURI);
-      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
-        return '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-      }
-    } catch(e) {}
-    return url;
-  }
-
-  // 1. Lock down window.top and window.parent location
-  try {
-    Object.defineProperty(window.top, 'location', {
-      get: function(){ return window.location; },
-      set: function(){},
-      configurable: false
-    });
-  } catch(e) {}
-  try {
-    Object.defineProperty(window.parent, 'location', {
-      get: function(){ return window.location; },
-      set: function(){},
-      configurable: false
-    });
-  } catch(e) {}
-
-  // 2. Intercept window.location.href setter
-  try {
-    var loc = window.location;
-    var origHref = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
-    if (origHref && origHref.set) {
-      Object.defineProperty(Location.prototype, 'href', {
-        get: origHref.get,
-        set: function(url) { origHref.set.call(this, rewriteUrl(url)); },
-        configurable: true
-      });
-    }
-  } catch(e) {}
-
-  // 3. Intercept window.location.assign / replace
-  var origAssign = window.location.assign.bind(window.location);
-  window.location.assign = function(url) { return origAssign(rewriteUrl(url)); };
-  var origReplace = window.location.replace.bind(window.location);
-  window.location.replace = function(url) { return origReplace(rewriteUrl(url)); };
-
-  // 4. Intercept document.location setter
-  try {
-    var docLoc = document;
-    Object.defineProperty(document, 'location', {
-      get: function(){ return window.location; },
-      set: function(url){ window.location.href = rewriteUrl(url); },
-      configurable: true
-    });
-  } catch(e) {}
-
-  // 5. Intercept window.open — force everything into _self (stays in iframe)
-  var origOpen = window.open;
-  window.open = function(url, target, features) {
-    return origOpen.call(this, rewriteUrl(url), '_self', features);
-  };
-
-  // 6. Intercept history.pushState / replaceState
-  var origPush = history.pushState;
-  history.pushState = function(state, title, url) {
-    if (arguments.length > 2) arguments[2] = rewriteUrl(url);
-    return origPush.apply(this, arguments);
-  };
-  var origReplaceState = history.replaceState;
-  history.replaceState = function(state, title, url) {
-    if (arguments.length > 2) arguments[2] = rewriteUrl(url);
-    return origReplaceState.apply(this, arguments);
-  };
-
-  // 7. Intercept all click events — rewrite <a href> and block target=_top/_parent/_blank
-  document.addEventListener('click', function(e) {
-    var el = e.target;
-    while (el && el.tagName !== 'A') el = el.parentElement;
-    if (el && el.tagName === 'A') {
-      // Force target to _self (no escaping the iframe)
-      el.target = '_self';
-      // Remove target attribute entirely if it's _top, _parent, or _blank
-      var t = (el.getAttribute('target') || '').toLowerCase();
-      if (t === '_top' || t === '_parent' || t === '_blank') {
-        el.removeAttribute('target');
-        el.target = '_self';
-      }
-      // Rewrite the href
-      var href = el.getAttribute('href');
-      if (href) {
-        var rewritten = rewriteUrl(href);
-        if (rewritten !== href) el.setAttribute('href', rewritten);
-      }
-    }
-  }, true);
-
-  // 8. Intercept form submissions — force target=_self, rewrite action
-  document.addEventListener('submit', function(e) {
-    var form = e.target;
-    if (form && form.tagName === 'FORM') {
-      form.target = '_self';
-      var action = form.getAttribute('action');
-      if (action) {
-        var rewritten = rewriteUrl(action);
-        if (rewritten !== action) form.setAttribute('action', rewritten);
-      }
-    }
-  }, true);
-
-  // 9. Block <meta http-equiv="refresh"> that could redirect away
-  var metaObserver = new MutationObserver(function(mutations) {
-    mutations.forEach(function(m) {
-      m.addedNodes.forEach(function(node) {
-        if (node.tagName === 'META') {
-          var eq = node.httpEquiv || node.getAttribute('http-equiv') || '';
-          if (eq.toLowerCase() === 'refresh') {
-            var content = node.content || node.getAttribute('content') || '';
-            // Only block if it redirects to an external URL
-            if (content.indexOf('url=') !== -1 || content.indexOf('URL=') !== -1) {
-              node.remove();
-            }
-          }
-        }
-      });
-    });
-  });
-  if (document.head) metaObserver.observe(document.head, { childList: true });
-  if (document.body) metaObserver.observe(document.body, { childList: true, subtree: true });
-
-  // 10. Strip target=_top/_parent/_blank from all existing anchors
-  function stripEscapeTargets() {
-    document.querySelectorAll('a[target], form[target], area[target]').forEach(function(el) {
-      var t = (el.getAttribute('target') || '').toLowerCase();
-      if (t === '_top' || t === '_parent' || t === '_blank') {
-        el.removeAttribute('target');
-      }
-    });
-  }
-  stripEscapeTargets();
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', stripEscapeTargets);
-  }
-  // Re-run periodically for dynamically added elements
-  setInterval(stripEscapeTargets, 1000);
-  var domObserver = new MutationObserver(function() { stripEscapeTargets(); });
-  if (document.body) domObserver.observe(document.body, { childList: true, subtree: true });
-
-  // 11. Block beforeunload that tries to redirect
-  window.addEventListener('beforeunload', function(e) {
-    // Prevent the page from navigating away
-  }, true);
-
-  // 12. Intercept window.location = "url" direct assignment
-  try {
-    var origWindowLoc = window.location;
-    Object.defineProperty(window, 'location', {
-      get: function() { return origWindowLoc; },
-      set: function(url) { origWindowLoc.href = rewriteUrl(url); },
-      configurable: false
-    });
-  } catch(e) {}
-})();
-</script>`;
 
 const AD_BLOCKER = `<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>`;
 
