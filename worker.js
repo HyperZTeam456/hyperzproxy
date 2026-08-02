@@ -1,8 +1,3 @@
-/**
- * HyperZProxy — Universal reverse proxy with CloudMoon iframe + ad blocking
- */
-
-// Proxy target — split into fragments and assembled at runtime.
 var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
 var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
 
@@ -140,6 +135,41 @@ var NAV_BLOCKER = '<script>(function(){' +
     'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
     'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
     'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
+  '}catch(e){}' +
+  // patch fetch() — route external URLs through the proxy
+  'try{' +
+    'var _fetch=window.fetch;' +
+    'window.fetch=function(input,init){' +
+      'var url=(typeof input==="string")?input:(input&&input.url);' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
+        'var proxied=toProxy(url);' +
+        'if(typeof input==="string"){input=proxied;}' +
+        'else{input=new Request(proxied,input);}' +
+      '}' +
+      'return _fetch.call(window,input,init);' +
+    '};' +
+  '}catch(e){}' +
+  // patch XMLHttpRequest — route external URLs through the proxy
+  'try{' +
+    'var _xhrOpen=XMLHttpRequest.prototype.open;' +
+    'XMLHttpRequest.prototype.open=function(method,url){' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
+        'url=toProxy(url);' +
+      '}' +
+      'var args=[method,url];' +
+      'for(var i=2;i<arguments.length;i++)args.push(arguments[i]);' +
+      'return _xhrOpen.apply(this,args);' +
+    '};' +
+  '}catch(e){}' +
+  // patch navigator.sendBeacon — route external URLs through the proxy
+  'try{' +
+    'var _beacon=navigator.sendBeacon;' +
+    'navigator.sendBeacon=function(url,data){' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
+        'url=toProxy(url);' +
+      '}' +
+      'return _beacon.call(navigator,url,data);' +
+    '};' +
   '}catch(e){}' +
   // catch plain <a> clicks with absolute hrefs to the real origin
   'document.addEventListener("click",function(e){' +
@@ -319,16 +349,35 @@ async function handleRequest(request) {
     return new Response('', { status: 204 });
   }
 
-  // Fetch the target page — use redirect:'follow' so Workers follows
-  // redirects automatically. Using 'manual' returns an opaque response
-  // that can't be read in the Workers runtime, causing Error 1101.
+  // Fetch the target — forward the original request's method, body, and headers
+  // so POST/PUT requests (sign-up forms, API calls, etc.) work correctly.
+  // Use redirect:'follow' so Workers follows redirects automatically.
+  var fwdHeaders = new Headers(request.headers);
+  fwdHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+  fwdHeaders.delete('Host');
+  fwdHeaders.delete('Origin');
+  fwdHeaders.delete('Referer');
+  fwdHeaders.delete('cf-connecting-ip');
+  fwdHeaders.delete('cf-ray');
+  fwdHeaders.delete('cf-visitor');
+  fwdHeaders.delete('cf-worker');
+  fwdHeaders.delete('x-forwarded-proto');
+  fwdHeaders.delete('x-forwarded-for');
+  fwdHeaders.delete('x-forwarded-host');
+  fwdHeaders.delete('x-real-ip');
+  fwdHeaders.delete('sec-fetch-site');
+  fwdHeaders.delete('sec-fetch-mode');
+  fwdHeaders.delete('sec-fetch-dest');
+  fwdHeaders.delete('sec-fetch-user');
+
   var fetchOpts = {
-    method: 'GET',
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    },
+    method: request.method,
+    headers: fwdHeaders,
     redirect: 'follow'
   };
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    fetchOpts.body = request.body;
+  }
 
   var resp;
   try {
