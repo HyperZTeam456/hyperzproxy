@@ -198,17 +198,15 @@ async function handleRequest(request) {
     return new Response('Invalid URL', { status: 400 });
   }
 
-  const fetchDest = request.headers.get('Sec-Fetch-Dest');
-  if (fetchDest === 'iframe') {
-    return proxyRequest(request, targetURL);
-  }
-
-  return new Response(getUniversalWrapper(targetURL), {
-    headers: {
-      'Content-Type': 'text/html',
-      'Permissions-Policy': 'accelerometer=*, gyroscope=*, camera=*, microphone=*, geolocation=*, hid=*, midi=*, clipboard-read=*, clipboard-write=*, xr-spatial-tracking=*, gamepad=*'
-    }
-  });
+  // ── Direct-fetch proxy (like HyperZWeb's semi-proxy) ──
+  // Instead of the universal wrapper with shadow DOM + /proxy/ for every asset,
+  // we fetch the target page's HTML server-side, inject a <base> tag so all
+  // relative URLs resolve against the original site, strip security headers,
+  // and return the HTML directly. The browser then loads assets (images, JS,
+  // CSS) directly from the original site — no proxy overhead per asset.
+  // This is the same approach HyperZWeb's "semi" proxy mode uses and it works
+  // much better for asset-heavy sites.
+  return proxyDirectFetch(request, targetURL);
 }
 
 function parseUniversalURL(pathname, search) {
@@ -254,6 +252,126 @@ function isValidURL(url) {
   } catch (e) {
     return false;
   }
+}
+
+// ── Direct-fetch proxy ──
+// Fetches the target page's HTML server-side, injects a <base> tag so all
+// relative URLs (img src, script src, CSS url(), etc.) resolve against the
+// ORIGINAL site — the browser loads assets directly, not through the proxy.
+// Strips security headers (CSP, X-Frame-Options) and blocks ads.
+// This is the same approach as HyperZWeb's "semi" proxy mode.
+async function proxyDirectFetch(request, targetURL) {
+  if (isAdRequest(targetURL)) {
+    return new Response('', { status: 204 });
+  }
+
+  console.log('Direct-fetch proxying:', targetURL);
+
+  const headers = new Headers();
+  headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+  const targetURLObj = new URL(targetURL);
+  headers.set('Host', targetURLObj.host);
+  headers.set('Referer', targetURLObj.origin + '/');
+
+  let response;
+  try {
+    response = await fetch(targetURL, {
+      method: 'GET',
+      headers: headers,
+      redirect: 'follow'
+    });
+  } catch (error) {
+    console.error('Direct fetch failed:', error);
+    return new Response('Failed to fetch: ' + error.message, { status: 502 });
+  }
+
+  const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+
+  // For non-HTML responses, pass through with CORS + security header stripping
+  if (!contentType.includes('text/html')) {
+    const passHeaders = new Headers(response.headers);
+    passHeaders.set('Access-Control-Allow-Origin', '*');
+    passHeaders.delete('Content-Security-Policy');
+    passHeaders.delete('X-Frame-Options');
+    passHeaders.delete('Frame-Options');
+    passHeaders.delete('Content-Security-Policy-Report-Only');
+    passHeaders.delete('Cross-Origin-Embedder-Policy');
+    passHeaders.delete('Cross-Origin-Opener-Policy');
+    passHeaders.delete('Cross-Origin-Resource-Policy');
+    passHeaders.delete('Strict-Transport-Security');
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: passHeaders
+    });
+  }
+
+  // HTML: fetch, inject <base>, strip security headers, block ads
+  let html = await response.text();
+  html = blockAdsInHTML(html);
+
+  // Inject <base> tag so relative URLs resolve against the original site.
+  // This is the key — the browser loads all assets directly from the original
+  // site, not through the proxy.
+  const baseTag = '<base href="' + targetURL + '">';
+  if (html.match(/<head[^>]*>/i)) {
+    html = html.replace(/<head[^>]*>/i, function(match) { return match + baseTag; });
+  } else if (html.includes('</head>')) {
+    html = html.replace('</head>', baseTag + '</head>');
+  } else {
+    html = baseTag + html;
+  }
+
+  // Inject ad-blocker CSS + minimal JS (no aggressive URL rewriting)
+  const injectionCode = `
+<style id="ad-blocker-css">
+  .a-div-horizontal, .a-div-vertical, .a-div-placeholder, .a-div-box,
+  ins.adsbygoogle, [data-ad-slot], [data-ad-client],
+  iframe[src*="googlesyndication"], iframe[src*="doubleclick"] {
+    display: none !important; visibility: hidden !important; opacity: 0 !important;
+    pointer-events: none !important; position: absolute !important;
+    width: 0 !important; height: 0 !important; overflow: hidden !important;
+  }
+</style>
+<script>
+(function(){
+  function removeAds(){
+    var sels = ['ins.adsbygoogle','[data-ad-slot]','[data-ad-client]','iframe[src*="googlesyndication"]','iframe[src*="doubleclick"]','.a-div-horizontal','.a-div-vertical','.a-div-placeholder','.a-div-box'];
+    sels.forEach(function(s){document.querySelectorAll(s).forEach(function(el){el.style.display='none';try{el.remove();}catch(e){}});});
+  }
+  removeAds();
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',removeAds);
+  window.addEventListener('load',removeAds);
+  setInterval(removeAds,500);
+  if(document.body)new MutationObserver(function(){removeAds();}).observe(document.body,{childList:true,subtree:true});
+})();
+</script>`;
+
+  if (html.match(/<head[^>]*>/i)) {
+    html = html.replace(/<head[^>]*>/i, function(match) { return match + injectionCode; });
+  } else {
+    html = injectionCode + html;
+  }
+
+  const newHeaders = new Headers(response.headers);
+  newHeaders.set('Content-Type', 'text/html; charset=utf-8');
+  newHeaders.set('Access-Control-Allow-Origin', '*');
+  newHeaders.delete('Content-Security-Policy');
+  newHeaders.delete('Content-Security-Policy-Report-Only');
+  newHeaders.delete('X-Frame-Options');
+  newHeaders.delete('Frame-Options');
+  newHeaders.delete('X-Content-Type-Options');
+  newHeaders.delete('Strict-Transport-Security');
+  newHeaders.delete('Cross-Origin-Embedder-Policy');
+  newHeaders.delete('Cross-Origin-Opener-Policy');
+  newHeaders.delete('Cross-Origin-Resource-Policy');
+  newHeaders.delete('Permissions-Policy');
+
+  return new Response(html, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders
+  });
 }
 
 async function proxyRequest(request, targetURL) {
