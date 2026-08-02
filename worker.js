@@ -312,64 +312,179 @@ function blockAdsInHTML(html) {
   return html;
 }
 
-// Sandbox script: prevents the proxied page from escaping the proxy
+// Sandbox script: prevents the proxied page from escaping the proxy in ANY way.
+// Intercepts every known navigation method and rewrites URLs to stay proxied.
 const SANDBOX_SCRIPT = `<script>
 (function(){
-  try { Object.defineProperty(window.top, 'location', { get: function(){ return window.location; }, set: function(){}, configurable: false }); } catch(e) {}
+  var PROXY_ORIGIN = location.origin;
+
+  // Helper: rewrite any URL to stay inside the proxy
+  function rewriteUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    if (url.startsWith('/') || url.startsWith('#') || url.startsWith(PROXY_ORIGIN) ||
+        url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:') ||
+        url.startsWith('mailto:') || url.startsWith('tel:') || url.startsWith('about:')) {
+      return url;
+    }
+    try {
+      var abs = new URL(url, document.baseURI);
+      if (abs.protocol === 'http:' || abs.protocol === 'https:') {
+        return '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
+      }
+    } catch(e) {}
+    return url;
+  }
+
+  // 1. Lock down window.top and window.parent location
+  try {
+    Object.defineProperty(window.top, 'location', {
+      get: function(){ return window.location; },
+      set: function(){},
+      configurable: false
+    });
+  } catch(e) {}
+  try {
+    Object.defineProperty(window.parent, 'location', {
+      get: function(){ return window.location; },
+      set: function(){},
+      configurable: false
+    });
+  } catch(e) {}
+
+  // 2. Intercept window.location.href setter
+  try {
+    var loc = window.location;
+    var origHref = Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+    if (origHref && origHref.set) {
+      Object.defineProperty(Location.prototype, 'href', {
+        get: origHref.get,
+        set: function(url) { origHref.set.call(this, rewriteUrl(url)); },
+        configurable: true
+      });
+    }
+  } catch(e) {}
+
+  // 3. Intercept window.location.assign / replace
+  var origAssign = window.location.assign.bind(window.location);
+  window.location.assign = function(url) { return origAssign(rewriteUrl(url)); };
+  var origReplace = window.location.replace.bind(window.location);
+  window.location.replace = function(url) { return origReplace(rewriteUrl(url)); };
+
+  // 4. Intercept document.location setter
+  try {
+    var docLoc = document;
+    Object.defineProperty(document, 'location', {
+      get: function(){ return window.location; },
+      set: function(url){ window.location.href = rewriteUrl(url); },
+      configurable: true
+    });
+  } catch(e) {}
+
+  // 5. Intercept window.open — force everything into _self (stays in iframe)
   var origOpen = window.open;
   window.open = function(url, target, features) {
-    if (url && typeof url === 'string') {
-      try { var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-      } catch(e) {}
-    }
-    return origOpen.call(this, url, '_self', features);
+    return origOpen.call(this, rewriteUrl(url), '_self', features);
   };
-  var origAssign = window.location.assign.bind(window.location);
-  window.location.assign = function(url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/')) {
-      try { var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-      } catch(e) {}
-    }
-    return origAssign(url);
-  };
-  var origReplace = window.location.replace.bind(window.location);
-  window.location.replace = function(url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/')) {
-      try { var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-      } catch(e) {}
-    }
-    return origReplace(url);
-  };
+
+  // 6. Intercept history.pushState / replaceState
   var origPush = history.pushState;
   history.pushState = function(state, title, url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/') && !url.startsWith('#')) {
-      try { var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-      } catch(e) {}
-    }
+    if (arguments.length > 2) arguments[2] = rewriteUrl(url);
     return origPush.apply(this, arguments);
   };
   var origReplaceState = history.replaceState;
   history.replaceState = function(state, title, url) {
-    if (url && typeof url === 'string' && !url.startsWith(location.origin) && !url.startsWith('/') && !url.startsWith('#')) {
-      try { var abs = new URL(url, document.baseURI);
-        if (abs.protocol === 'http:' || abs.protocol === 'https:') url = '/' + abs.hostname + abs.pathname + abs.search + abs.hash;
-      } catch(e) {}
-    }
+    if (arguments.length > 2) arguments[2] = rewriteUrl(url);
     return origReplaceState.apply(this, arguments);
   };
-  var observer = new MutationObserver(function(mutations) {
+
+  // 7. Intercept all click events — rewrite <a href> and block target=_top/_parent/_blank
+  document.addEventListener('click', function(e) {
+    var el = e.target;
+    while (el && el.tagName !== 'A') el = el.parentElement;
+    if (el && el.tagName === 'A') {
+      // Force target to _self (no escaping the iframe)
+      el.target = '_self';
+      // Remove target attribute entirely if it's _top, _parent, or _blank
+      var t = (el.getAttribute('target') || '').toLowerCase();
+      if (t === '_top' || t === '_parent' || t === '_blank') {
+        el.removeAttribute('target');
+        el.target = '_self';
+      }
+      // Rewrite the href
+      var href = el.getAttribute('href');
+      if (href) {
+        var rewritten = rewriteUrl(href);
+        if (rewritten !== href) el.setAttribute('href', rewritten);
+      }
+    }
+  }, true);
+
+  // 8. Intercept form submissions — force target=_self, rewrite action
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (form && form.tagName === 'FORM') {
+      form.target = '_self';
+      var action = form.getAttribute('action');
+      if (action) {
+        var rewritten = rewriteUrl(action);
+        if (rewritten !== action) form.setAttribute('action', rewritten);
+      }
+    }
+  }, true);
+
+  // 9. Block <meta http-equiv="refresh"> that could redirect away
+  var metaObserver = new MutationObserver(function(mutations) {
     mutations.forEach(function(m) {
       m.addedNodes.forEach(function(node) {
-        if (node.tagName === 'META' && (node.httpEquiv === 'refresh' || node.getAttribute('http-equiv') === 'refresh')) node.remove();
+        if (node.tagName === 'META') {
+          var eq = node.httpEquiv || node.getAttribute('http-equiv') || '';
+          if (eq.toLowerCase() === 'refresh') {
+            var content = node.content || node.getAttribute('content') || '';
+            // Only block if it redirects to an external URL
+            if (content.indexOf('url=') !== -1 || content.indexOf('URL=') !== -1) {
+              node.remove();
+            }
+          }
+        }
       });
     });
   });
-  if (document.head) observer.observe(document.head, { childList: true });
-  if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+  if (document.head) metaObserver.observe(document.head, { childList: true });
+  if (document.body) metaObserver.observe(document.body, { childList: true, subtree: true });
+
+  // 10. Strip target=_top/_parent/_blank from all existing anchors
+  function stripEscapeTargets() {
+    document.querySelectorAll('a[target], form[target], area[target]').forEach(function(el) {
+      var t = (el.getAttribute('target') || '').toLowerCase();
+      if (t === '_top' || t === '_parent' || t === '_blank') {
+        el.removeAttribute('target');
+      }
+    });
+  }
+  stripEscapeTargets();
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', stripEscapeTargets);
+  }
+  // Re-run periodically for dynamically added elements
+  setInterval(stripEscapeTargets, 1000);
+  var domObserver = new MutationObserver(function() { stripEscapeTargets(); });
+  if (document.body) domObserver.observe(document.body, { childList: true, subtree: true });
+
+  // 11. Block beforeunload that tries to redirect
+  window.addEventListener('beforeunload', function(e) {
+    // Prevent the page from navigating away
+  }, true);
+
+  // 12. Intercept window.location = "url" direct assignment
+  try {
+    var origWindowLoc = window.location;
+    Object.defineProperty(window, 'location', {
+      get: function() { return origWindowLoc; },
+      set: function(url) { origWindowLoc.href = rewriteUrl(url); },
+      configurable: false
+    });
+  } catch(e) {}
 })();
 </script>`;
 
