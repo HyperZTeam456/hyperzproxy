@@ -1,3 +1,8 @@
+/**
+ * HyperZProxy — Universal reverse proxy with CloudMoon iframe + ad blocking
+ */
+
+// Proxy target — split into fragments and assembled at runtime.
 var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
 var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
 
@@ -96,6 +101,132 @@ function blockAdsInHTML(html) {
 }
 
 var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>';
+
+// Navigation blocker: intercepts runtime navigation attempts (location.assign,
+// location.replace, window.open, history.pushState/replaceState, <a> clicks)
+// and rewrites them to go through the proxy. Also neutralizes frame-busting
+// (top/parent redirect attempts). This covers what <base> can't — dynamic
+// JS-driven navigation. The one thing it CAN'T catch is `location.href =`
+// (non-configurable accessor) — for that, see the JS source rewriter below.
+var NAV_BLOCKER = '<script>(function(){' +
+  'var ORIGIN=self.location.origin;' +
+  'function toProxy(u){' +
+    'try{' +
+      'var abs=new URL(u,document.baseURI).href;' +
+      'if(abs.indexOf(ORIGIN)===0)return abs;' +
+      'return ORIGIN+"/proxy/"+encodeURIComponent(abs);' +
+    '}catch(e){return u;}' +
+  '}' +
+  // block frame-busting: neutralize top/parent redirect attempts
+  'try{' +
+    'if(window.top!==window.self){' +
+      'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
+      'Object.defineProperty(window,"parent",{get:function(){return window.self;}});' +
+    '}' +
+  '}catch(e){}' +
+  // patch Location.prototype.assign / replace
+  'try{' +
+    'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
+    'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
+    'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
+  '}catch(e){}' +
+  // patch window.open
+  'try{' +
+    'var _open=window.open;' +
+    'window.open=function(u,n,s){return _open.call(window,u?toProxy(u):u,n,s);};' +
+  '}catch(e){}' +
+  // patch history.pushState / replaceState so SPA nav stays proxied
+  'try{' +
+    'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
+    'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
+    'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
+  '}catch(e){}' +
+  // catch plain <a> clicks with absolute hrefs to the real origin
+  'document.addEventListener("click",function(e){' +
+    'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
+    'if(!a)return;' +
+    'var h=a.getAttribute("href")||"";' +
+    'if(/^https?:\\/\\//i.test(h)&&h.indexOf(ORIGIN)!==0){' +
+      'e.preventDefault();' +
+      'window.location.href=toProxy(h);' +
+    '}' +
+  '},true);' +
+'})();</script>';
+
+// JS source rewriter: rewrites `location.href =`, `location =`, `document.location =`
+// in JavaScript source to go through the proxy. This is the ONLY way to catch
+// the non-configurable `location.href` setter — rewrite the source code itself.
+// Applied to both inline <script> blocks in HTML and external .js responses.
+function rewriteJsSource(js) {
+  // Rewrite: location.href = "url" → location.href = "/proxy/encoded"
+  // Rewrite: location = "url" → location.href = "/proxy/encoded"
+  // Rewrite: document.location = "url" → document.location = "/proxy/encoded"
+  // Rewrite: window.location = "url" → window.location = "/proxy/encoded"
+  // We rewrite assignment targets, not reads, to avoid breaking code that
+  // reads location.href for comparison.
+
+  // Pattern: (location|location.href|document.location|window.location)\s*=\s*("..."|'...'|`...`)
+  var assignPattern = /((?:window\.|document\.)?location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\2/gi;
+  js = js.replace(assignPattern, function(match, target, quote, url) {
+    // Only rewrite if it's an absolute URL (has ://)
+    if (/^https?:\/\//i.test(url)) {
+      return target + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
+    }
+    // Protocol-relative URLs (//example.com)
+    if (url.indexOf('//') === 0) {
+      return target + ' = ' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
+    }
+    return match;
+  });
+
+  // Rewrite: location.assign("url") and location.replace("url")
+  var methodPattern = /((?:window\.|document\.)?location)\.(assign|replace)\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3\s*\)/gi;
+  js = js.replace(methodPattern, function(match, loc, method, quote, url) {
+    if (/^https?:\/\//i.test(url)) {
+      return loc + '.' + method + '(' + quote + '/proxy/' + encodeURIComponent(url) + quote + ')';
+    }
+    if (url.indexOf('//') === 0) {
+      return loc + '.' + method + '(' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote + ')';
+    }
+    return match;
+  });
+
+  // Rewrite: window.open("url", ...)
+  var openPattern = /window\.open\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\1/gi;
+  js = js.replace(openPattern, function(match, quote, url) {
+    if (/^https?:\/\//i.test(url)) {
+      return 'window.open(' + quote + '/proxy/' + encodeURIComponent(url) + quote;
+    }
+    if (url.indexOf('//') === 0) {
+      return 'window.open(' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
+    }
+    return match;
+  });
+
+  // Rewrite: top.location = "url" and parent.location = "url"
+  var topPattern = /(top|parent)\.(location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3/gi;
+  js = js.replace(topPattern, function(match, scope, loc, quote, url) {
+    if (/^https?:\/\//i.test(url)) {
+      return scope + '.' + loc + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
+    }
+    return match;
+  });
+
+  return js;
+}
+
+// Rewrite inline <script> blocks in HTML
+function rewriteInlineScripts(html) {
+  return html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, function(match, attrs, content) {
+    // Skip scripts with src attribute (external scripts)
+    if (/\bsrc\s*=/i.test(attrs)) return match;
+    // Skip empty scripts
+    if (!content.trim()) return match;
+    // Rewrite the JS source
+    var rewritten = rewriteJsSource(content);
+    return '<script' + attrs + '>' + rewritten + '</script>';
+  });
+}
 
 function parseUniversalURL(pathname, search) {
   var targetPath = pathname.charAt(0) === '/' ? pathname.slice(1) : pathname;
@@ -208,13 +339,28 @@ async function handleRequest(request) {
 
   var contentType = (resp.headers.get('Content-Type') || '').toLowerCase();
 
-  // Non-HTML: pass through with CORS + stripped security headers
+  // Non-HTML: pass through with CORS + stripped security headers.
+  // For JavaScript responses, also rewrite navigation calls in the source.
   if (contentType.indexOf('text/html') === -1) {
     var passH = new Headers(resp.headers);
     passH.set('Access-Control-Allow-Origin', '*');
     stripSecurityHeaders(passH);
-    if (contentType.indexOf('image/') !== -1 || contentType.indexOf('font/') !== -1 ||
-        contentType.indexOf('javascript') !== -1 || contentType.indexOf('css') !== -1) {
+
+    // Rewrite JS source for navigation calls
+    if (contentType.indexOf('javascript') !== -1) {
+      try {
+        var jsSource = await resp.text();
+        jsSource = rewriteJsSource(jsSource);
+        passH.set('Cache-Control', 'public, max-age=86400');
+        return new Response(jsSource, {
+          status: resp.status, statusText: resp.statusText, headers: passH
+        });
+      } catch(e) {
+        // If JS rewrite fails, pass through the original
+      }
+    }
+
+    if (contentType.indexOf('image/') !== -1 || contentType.indexOf('font/') !== -1 || contentType.indexOf('css') !== -1) {
       passH.set('Cache-Control', 'public, max-age=86400');
     }
     return new Response(resp.body, {
@@ -222,7 +368,8 @@ async function handleRequest(request) {
     });
   }
 
-  // HTML: fetch, clean, inject <base>, strip headers, block ads
+  // HTML: fetch, clean, inject <base>, strip headers, block ads, block nav,
+  // rewrite inline JS scripts
   var pageHtml;
   try {
     pageHtml = await resp.text();
@@ -231,8 +378,12 @@ async function handleRequest(request) {
   }
 
   pageHtml = blockAdsInHTML(pageHtml);
-  pageHtml = injectInHead(pageHtml, '<base href="' + targetURL + '">');
+  // Use resp.url (final URL after redirects) for <base> so assets resolve correctly
+  pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
+  pageHtml = injectInHead(pageHtml, NAV_BLOCKER);
+  // Rewrite navigation calls in inline <script> blocks
+  pageHtml = rewriteInlineScripts(pageHtml);
 
   var htmlH = new Headers(resp.headers);
   htmlH.set('Content-Type', 'text/html; charset=utf-8');
