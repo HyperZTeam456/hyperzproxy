@@ -208,10 +208,10 @@ async function handleRequest(request) {
     });
   }
 
-  // HTML: fetch, clean, inject <base> pointing to the REAL site (so assets
-  // load directly), then wrap the entire page in a sandboxed iframe that
-  // BLOCKS all top-level navigation. The iframe sandbox attribute is the
-  // real sandbox — no JavaScript interception needed.
+  // HTML: fetch, clean, inject <base>, strip headers, block ads.
+  // The sandbox is enforced via CSP headers (navigate-to) rather than an
+  // iframe wrapper — this avoids response size limits from embedding the
+  // entire page HTML in a srcdoc attribute.
   var pageHtml = await fetchResponse.text();
   pageHtml = blockAdsInHTML(pageHtml);
 
@@ -219,57 +219,23 @@ async function handleRequest(request) {
   // load directly from the original server. No URL rewriting needed.
   pageHtml = injectInHead(pageHtml, '<base href="' + targetURL + '">');
 
-  // Ad blocker (inside the iframe content)
+  // Ad blocker
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
 
-  // Build a wrapper page that contains the proxied HTML in a sandboxed iframe.
-  // The sandbox attribute is the REAL sandbox:
-  //   - NO allow-top-navigation → blocks all top-level navigation
-  //   - NO allow-popups → blocks window.open
-  //   - allow-scripts → JS runs inside the iframe
-  //   - allow-forms → forms work
-  //   - allow-same-origin → the iframe can access its own DOM
-  //   - allow-downloads → downloads work
-  // The iframe content is injected via srcdoc (same-origin, no network needed).
-
-  // Build the srcdoc attribute — HTML-escape the page content so it can be
-  // embedded as an attribute value. This avoids btoa/atob (not available in
-  // Workers runtime) and is simpler/more reliable.
-  var srcdocContent = pageHtml
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-  var wrapperHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
-    '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-    '<title>' + targetURLObj.hostname + '</title>' +
-    '<style>*{margin:0;padding:0;box-sizing:border-box}' +
-    'html,body{width:100%;height:100%;overflow:hidden;background:#fff}' +
-    'iframe{width:100%;height:100%;border:none}</style></head><body>' +
-    '<iframe id="p" srcdoc="' + srcdocContent + '"' +
-    ' sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-pointer-lock allow-modals allow-presentation"' +
-    ' allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad"' +
-    ' style="width:100%;height:100%;border:none"></iframe>' +
-    '</body></html>';
-
-  var wrapperHeaders = new Headers(fetchResponse.headers);
-  wrapperHeaders.set('Content-Type', 'text/html; charset=utf-8');
-  wrapperHeaders.set('Access-Control-Allow-Origin', '*');
-  // CSP: only allow the proxy origin + the target site
-  wrapperHeaders.set('Content-Security-Policy',
+  var htmlHeaders = new Headers(fetchResponse.headers);
+  htmlHeaders.set('Content-Type', 'text/html; charset=utf-8');
+  htmlHeaders.set('Access-Control-Allow-Origin', '*');
+  stripSecurityHeaders(htmlHeaders);
+  // CSP: block top-level navigation away from the proxy.
+  // navigate-to 'self' prevents the page from navigating to any other origin.
+  // frame-ancestors * allows embedding in any iframe (HyperZWeb).
+  htmlHeaders.set('Content-Security-Policy',
     "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
-    "frame-src 'self'; " +
-    "navigate-to 'self'");
-  stripSecurityHeaders(wrapperHeaders);
-  // Re-add our CSP (stripSecurityHeaders deleted it)
-  wrapperHeaders.set('Content-Security-Policy',
-    "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; " +
-    "frame-src 'self'; " +
+    "frame-ancestors *; " +
     "navigate-to 'self'");
 
-  return new Response(wrapperHtml, {
-    status: fetchResponse.status, statusText: fetchResponse.statusText, headers: wrapperHeaders
+  return new Response(pageHtml, {
+    status: fetchResponse.status, statusText: fetchResponse.statusText, headers: htmlHeaders
   });
 }
 
