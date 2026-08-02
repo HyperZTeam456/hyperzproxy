@@ -75,18 +75,32 @@ async function handleRequest(request) {
     });
   }
 
-  // Cookie check: the CloudMoon cookie ONLY applies to CloudMoon's own
-  // paths: /web.cloudmoonapp.com, /, /_app/, /manifest.json, /sw.js.
-  // For ANY other path (including /proxy/ which is used by the universal
-  // wrapper for ALL sites), ignore the cookie and fall through to the normal
-  // proxy. This prevents the CloudMoon cookie from hijacking non-CloudMoon
-  // sites AND prevents /proxy/ requests from being misrouted to CloudMoon.
-  if (hasCloudMoonCookie(request) &&
-      (pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/') ||
-       pathname === '/' || pathname === '' ||
-       pathname.startsWith('/_app/') ||
-       pathname === '/manifest.json' || pathname === '/sw.js')) {
-    return handleCloudMoonRequest(request);
+  // Cookie check: the CloudMoon cookie applies to CloudMoon's own paths
+  // (/web.cloudmoonapp.com, /, /_app/, /manifest.json, /sw.js) AND to /proxy/
+  // requests that target web.cloudmoonapp.com (CloudMoon's internal game loading).
+  // For /proxy/ requests targeting OTHER sites (like crazygames.com), the cookie
+  // is ignored and the normal proxy handles them. This lets CloudMoon games work
+  // while non-CloudMoon sites aren't hijacked.
+  if (hasCloudMoonCookie(request)) {
+    var isCloudMoonPath =
+      pathname === ENTER_PATH || pathname.startsWith(ENTER_PATH + '/') ||
+      pathname === '/' || pathname === '' ||
+      pathname.startsWith('/_app/') ||
+      pathname === '/manifest.json' || pathname === '/sw.js';
+
+    // For /proxy/ paths, check if the decoded target URL is for cloudmoonapp.com
+    if (!isCloudMoonPath && pathname.startsWith('/proxy/')) {
+      try {
+        var decodedProxyUrl = decodeURIComponent(pathname.substring('/proxy/'.length));
+        if (decodedProxyUrl.indexOf('cloudmoonapp.com') !== -1) {
+          isCloudMoonPath = true;
+        }
+      } catch(e) {}
+    }
+
+    if (isCloudMoonPath) {
+      return handleCloudMoonRequest(request);
+    }
   }
 
   // ENTER only matters when there's no cookie yet — genuinely entering CloudMoon
