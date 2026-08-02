@@ -131,6 +131,16 @@ async function handleRequest(request) {
     }
   }
 
+  // ── Cookie-less CloudMoon routing ──
+  // /proxy/ requests targeting cloudmoonapp.com MUST always go through
+  // handleCloudMoonRequest, even without the cookie. Otherwise the cookie
+  // expiring (60s) mid-session would cause CloudMoon asset requests to fall
+  // through to proxyRequest, which injects aggressive URL rewriting that breaks
+  // CloudMoon's SPA JavaScript.
+  if (isProxyCloudMoon(pathname)) {
+    return handleCloudMoonRequest(request);
+  }
+
   // ENTER: when visiting /web.cloudmoonapp.com (or /cloudmoonapp.com) without
   // a cookie, serve the CloudMoon shell HTML directly (the same HTML that / serves
   // when in CloudMoon mode). No redirect — the shell loads immediately. We set
