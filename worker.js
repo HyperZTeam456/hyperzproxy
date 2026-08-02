@@ -1,11 +1,3 @@
-export default {
-  async fetch(request, env, ctx) {
-    return handleRequest(request);
-  }
-};
-
-// Proxy target — split into fragments and assembled at runtime so the
-// full URL never appears as a single string in the source code.
 var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
 var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
 
@@ -263,7 +255,6 @@ async function proxyDirectFetch(request, targetURL) {
   // <base> tag pointing to the PROXY origin + target domain, so relative URLs
   // like /games resolve to /crazygames.com/games (through the proxy) instead of
   // https://crazygames.com/games (direct, which would escape the proxy).
-  var targetURLObj = new URL(targetURL);
   var basePath = '/' + targetURLObj.hostname + targetURLObj.pathname;
   // Remove trailing filename (keep directory path)
   if (basePath.lastIndexOf('/') > 0) basePath = basePath.slice(0, basePath.lastIndexOf('/') + 1);
@@ -499,3 +490,10 @@ const SANDBOX_SCRIPT = `<script>
 </script>`;
 
 const AD_BLOCKER = `<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>`;
+
+// Cloudflare Workers entry point (must be at end for proper module export)
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request);
+  }
+};
