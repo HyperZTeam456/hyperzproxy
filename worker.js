@@ -101,34 +101,20 @@ class SrcAttrRewriter {
   element(el) {
     var src = el.getAttribute(this.attr);
     if (!src) return;
-    if (src.indexOf('data:') === 0 || src.indexOf('blob:') === 0) return;
-    if (src.indexOf('javascript:') === 0) return;
-    // Skip if already a proxy URL
-    if (src.indexOf('/proxy/') === 0) return;
     var abs;
     try { abs = new URL(src, this.baseURL); } catch(e) { return; }
     if (abs.protocol === 'data:' || abs.protocol === 'blob:') return;
-    // Use ABSOLUTE URL to the Worker so it doesn't get resolved against
-    // the <base href> tag (which points to the real site).
-    // Preserve real host/path structure (host/path?query) instead of
-    // encoding the whole URL into one opaque percent-encoded segment, so
-    // downstream code that does path math (webpack publicPath:'auto',
-    // relative imports, new URL('./x', import.meta.url)) keeps working.
     el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + abs.host + abs.pathname + abs.search);
   }
 }
 
-async function rewriteIframesAndAssets(resp, baseURL, workerOrigin) {
+function rewriteIframesAndAssets(html, baseURL, workerOrigin) {
   var rewriter = new HTMLRewriter()
     .on('iframe[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
     .on('script[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
     .on('img[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
-    .on('link[href]', new SrcAttrRewriter(baseURL, workerOrigin, 'href'))
-    .on('source[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
-    .on('video[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
-    .on('audio[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'));
-  var transformed = rewriter.transform(resp);
-  return await transformed.text();
+    .on('link[href]', new SrcAttrRewriter(baseURL, workerOrigin, 'href'));
+  return rewriter.transform(new Response(html)).text();
 }
 
 function blockAdsInHTML(html) {
@@ -146,26 +132,49 @@ function blockAdsInHTML(html) {
 
 var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>';
 
-// Navigation blocker: intercepts runtime navigation attempts (location.assign,
-// location.replace, window.open, history.pushState/replaceState, <a> clicks)
-// and rewrites them to go through the proxy. Also neutralizes frame-busting
-// (top/parent redirect attempts). This covers what <base> can't — dynamic
-// JS-driven navigation. The one thing it CAN'T catch is `location.href =`
-// (non-configurable accessor) — for that, see the JS source rewriter below.
-var NAV_BLOCKER = '<script>(function(){' +
-  'var ORIGIN=self.location.origin;' +
+var SANDBOX_SCRIPT = '<script>(function(){' +
+  'var SELF_ORIGIN=self.location.origin;' +
+  'var IS_TOP_FRAME=(window.self===window.top);' +
   'function toProxy(u){' +
     'try{' +
       'var abs=new URL(u,document.baseURI);' +
-      // Same-origin guard: never re-wrap a URL that already points at the
-      // Worker itself (prevents /proxy/worker-host/proxy/... double-wrap).
-      'if(abs.origin===ORIGIN)return abs.href;' +
-      // Preserve real host/path structure so downstream path math works.
-      'return ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
+      'return SELF_ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
-  // 11. Kill Service Workers — they run in an isolated scope our patches
-  // can't reach, and will silently bypass the entire proxy layer.
+
+  // --- lightweight patches: run in EVERY frame, top and nested ---
+  'try{' +
+    'var _fetch=window.fetch;' +
+    'window.fetch=function(input,init){' +
+      'var url=(typeof input==="string")?input:(input&&input.url);' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(SELF_ORIGIN)!==0){' +
+        'var proxied=toProxy(url);' +
+        'if(typeof input==="string"){input=proxied;}' +
+        'else{input=new Request(proxied,input);}' +
+      '}' +
+      'return _fetch.call(window,input,init);' +
+    '};' +
+  '}catch(e){}' +
+  'try{' +
+    'var _xopen=XMLHttpRequest.prototype.open;' +
+    'XMLHttpRequest.prototype.open=function(method,url){' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(SELF_ORIGIN)!==0){' +
+        'url=toProxy(url);' +
+      '}' +
+      'var args=[method,url];' +
+      'for(var i=2;i<arguments.length;i++)args.push(arguments[i]);' +
+      'return _xopen.apply(this,args);' +
+    '};' +
+  '}catch(e){}' +
+  'try{' +
+    'var _beacon=navigator.sendBeacon;' +
+    'navigator.sendBeacon=function(url,data){' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(SELF_ORIGIN)!==0){' +
+        'url=toProxy(url);' +
+      '}' +
+      'return _beacon.call(navigator,url,data);' +
+    '};' +
+  '}catch(e){}' +
   'try{' +
     'if(navigator.serviceWorker){' +
       'navigator.serviceWorker.register=function(){' +
@@ -176,189 +185,18 @@ var NAV_BLOCKER = '<script>(function(){' +
       '});' +
     '}' +
   '}catch(e){}' +
-  // block frame-busting: neutralize top/parent redirect attempts
-  'try{' +
-    'if(window.top!==window.self){' +
-      'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
-      'Object.defineProperty(window,"parent",{get:function(){return window.self;}});' +
-    '}' +
-  '}catch(e){}' +
-  // patch Location.prototype.assign / replace
-  'try{' +
-    'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
-    'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
-    'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
-  '}catch(e){}' +
-  // patch window.open — gate popups by user gesture (blocks ad popups from timers)
+  'var lastGesture=0;' +
+  'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
   'try{' +
     'var _open=window.open;' +
-    'var lastGesture=0;' +
-    'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
     'window.open=function(u,n,s){' +
-      'var sinceGesture=Date.now()-lastGesture;' +
-      'if(sinceGesture>1000){return null;}' +
+      'if(Date.now()-lastGesture>1000){return null;}' +
       'return _open.call(window,u?toProxy(u):u,n,s);' +
     '};' +
   '}catch(e){}' +
-  // patch history.pushState / replaceState so SPA nav stays proxied
-  'try{' +
-    'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
-    'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
-    'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
-  '}catch(e){}' +
-  // patch fetch() — route external URLs through the proxy
-  'try{' +
-    'var _fetch=window.fetch;' +
-    'window.fetch=function(input,init){' +
-      'var url=(typeof input==="string")?input:(input&&input.url);' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
-        'var proxied=toProxy(url);' +
-        'if(typeof input==="string"){input=proxied;}' +
-        'else{input=new Request(proxied,input);}' +
-      '}' +
-      'return _fetch.call(window,input,init);' +
-    '};' +
-  '}catch(e){}' +
-  // patch XMLHttpRequest — route external URLs through the proxy
-  'try{' +
-    'var _xhrOpen=XMLHttpRequest.prototype.open;' +
-    'XMLHttpRequest.prototype.open=function(method,url){' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
-        'url=toProxy(url);' +
-      '}' +
-      'var args=[method,url];' +
-      'for(var i=2;i<arguments.length;i++)args.push(arguments[i]);' +
-      'return _xhrOpen.apply(this,args);' +
-    '};' +
-  '}catch(e){}' +
-  // patch navigator.sendBeacon — route external URLs through the proxy
-  'try{' +
-    'var _beacon=navigator.sendBeacon;' +
-    'navigator.sendBeacon=function(url,data){' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
-        'url=toProxy(url);' +
-      '}' +
-      'return _beacon.call(navigator,url,data);' +
-    '};' +
-  '}catch(e){}' +
-  // 8. Rewrite dynamically-injected script/img/iframe/link src before load —
-  // batched via rAF/idleCallback and deduped so high-frequency game DOM churn
-  // doesn't block the main thread (was causing RESULT_CODE_HUNG).
-  'try{' +
-    'var seenEls=new WeakSet();' +
-    'var pending=new Set();' +
-    'var scheduled=false;' +
-    'var flushBudgetMs=8;' +
-    'var observerDisabled=false;' +
-    'var mo;' +
-    'function rewriteEl(el){' +
-      'if(!el||!el.getAttribute||seenEls.has(el))return;' +
-      'seenEls.add(el);' +
-      'var tag=el.tagName;' +
-      'if(tag==="A"&&el.getAttribute("target")==="_blank"){' +
-        'var style=el.style;' +
-        'if(style&&(style.display==="none"||style.visibility==="hidden")){' +
-          'el.removeAttribute("target");' +
-        '}' +
-        'return;' +
-      '}' +
-      'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"){' +
-        'var src=el.getAttribute("src");' +
-        'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
-          'el.setAttribute("src",toProxy(src));' +
-        '}' +
-        'return;' +
-      '}' +
-      'if(tag==="LINK"){' +
-        'var href=el.getAttribute("href");' +
-        'if(href&&/^https?:\\/\\//i.test(href)&&href.indexOf(ORIGIN)!==0){' +
-          'el.setAttribute("href",toProxy(href));' +
-        '}' +
-      '}' +
-    '}' +
-    'function flush(){' +
-      'scheduled=false;' +
-      'var start=performance.now();' +
-      'pending.forEach(function(n){' +
-        'if(!n.isConnected)return;' +
-        'rewriteEl(n);' +
-        'if(n.querySelectorAll){' +
-          'var found=n.querySelectorAll("script[src],img[src],iframe[src],link[href],a[target=_blank]");' +
-          'for(var i=0;i<found.length;i++)rewriteEl(found[i]);' +
-        '}' +
-      '});' +
-      'pending.clear();' +
-      'if(performance.now()-start>flushBudgetMs*4&&mo){' +
-        'observerDisabled=true;' +
-        'mo.disconnect();' +
-        'console.warn("[sandbox] MutationObserver disabled \u2014 flush() exceeded budget, likely causing page hang");' +
-      '}' +
-    '}' +
-    'function schedule(){' +
-      'if(scheduled)return;' +
-      'scheduled=true;' +
-      '(window.requestIdleCallback||window.requestAnimationFrame)(flush);' +
-    '}' +
-    'mo=new MutationObserver(function(muts){' +
-      'if(observerDisabled)return;' +
-      'for(var i=0;i<muts.length;i++){' +
-        'var m=muts[i];' +
-        'if(m.type==="attributes"){pending.add(m.target);continue;}' +
-        'var added=m.addedNodes;' +
-        'for(var j=0;j<added.length;j++){' +
-          'var n=added[j];' +
-          'if(n.nodeType===1)pending.add(n);' +
-        '}' +
-      '}' +
-      'if(pending.size)schedule();' +
-    '});' +
-    'mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
-  '}catch(e){}' +
-  // 9. Navigation API — catches location.href=, assign(), replace(), everything
-  // Supported in Chrome/Edge. Falls back to the polling for Firefox/Safari.
-  'try{' +
-    'if(window.navigation){' +
-      'navigation.addEventListener("navigate",function(e){' +
-        'var dest=e.destination&&e.destination.url;' +
-        'if(!dest)return;' +
-        'if(dest.indexOf(ORIGIN)!==0){' +
-          'e.preventDefault();' +
-          'window.location.href=toProxy(dest);' +
-        '}' +
-      '});' +
-    '}' +
-  '}catch(e){}' +
-  // 10. Patch src/href property setters directly — closes the race
-  // between dynamic script/link creation and the MutationObserver.
-  // The observer is async/batched; property setters fire synchronously
-  // the instant JS sets .src, before any network activity starts.
-  'try{' +
-    'function patchSrcProp(proto,attr){' +
-      'var desc=Object.getOwnPropertyDescriptor(proto,attr);' +
-      'if(!desc||!desc.set)return;' +
-      'Object.defineProperty(proto,attr,{' +
-        'get:desc.get,' +
-        'set:function(v){' +
-          'try{' +
-            'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)&&v.indexOf(ORIGIN)!==0){' +
-              'v=toProxy(v);' +
-            '}' +
-          '}catch(e){}' +
-          'return desc.set.call(this,v);' +
-        '},' +
-        'configurable:true' +
-      '});' +
-    '}' +
-    'patchSrcProp(HTMLScriptElement.prototype,"src");' +
-    'patchSrcProp(HTMLImageElement.prototype,"src");' +
-    'patchSrcProp(HTMLIFrameElement.prototype,"src");' +
-    'patchSrcProp(HTMLLinkElement.prototype,"href");' +
-  '}catch(e){}' +
-  // catch <a> clicks — handle target=_blank via controlled window.open
   'document.addEventListener("click",function(e){' +
     'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
-    'if(!a)return;' +
-    'var h=a.getAttribute("href")||"";' +
+    'if(!a)return;var h=a.getAttribute("href")||"";' +
     'if(!/^https?:\\/\\//i.test(h))return;' +
     'e.preventDefault();' +
     'var dest=toProxy(h);' +
@@ -366,6 +204,136 @@ var NAV_BLOCKER = '<script>(function(){' +
     'if(tgt&&tgt!=="_self"){window.open(dest,"_blank","noopener,noreferrer");}' +
     'else{window.location.href=dest;}' +
   '},true);' +
+  'document.addEventListener("submit",function(e){' +
+    'var f=e.target;if(!f||!f.action)return;' +
+    'if(/^https?:\\/\\//i.test(f.action)&&f.action.indexOf(SELF_ORIGIN)!==0){' +
+      'e.preventDefault();f.action=toProxy(f.action);f.submit();' +
+    '}' +
+  '},true);' +
+
+  // --- heavy patches: TOP FRAME ONLY, to avoid doubling up inside the game iframe ---
+  'if(IS_TOP_FRAME){' +
+    'try{' +
+      'if(window.top!==window.self){' +
+        'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
+        'Object.defineProperty(window,"parent",{get:function(){return window.self;}});' +
+      '}' +
+    '}catch(e){}' +
+    'try{' +
+      'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
+      'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
+      'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
+    '}catch(e){}' +
+    'try{' +
+      'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
+      'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
+      'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
+    '}catch(e){}' +
+    'var lastHref=self.location.href;' +
+    'setInterval(function(){' +
+      'if(self.location.href!==lastHref){' +
+        'var cur=self.location.href;' +
+        'if(cur.indexOf(SELF_ORIGIN)!==0){self.location.href=toProxy(cur);}' +
+        'lastHref=self.location.href;' +
+      '}' +
+    '},150);' +
+    'try{' +
+      'if(window.navigation){' +
+        'navigation.addEventListener("navigate",function(e){' +
+          'var dest=e.destination&&e.destination.url;' +
+          'if(!dest)return;' +
+          'if(dest.indexOf(SELF_ORIGIN)!==0){e.preventDefault();window.location.href=toProxy(dest);}' +
+        '});' +
+      '}' +
+    '}catch(e){}' +
+    'try{' +
+      'function patchSrcProp(proto,attr){' +
+        'var desc=Object.getOwnPropertyDescriptor(proto,attr);' +
+        'if(!desc||!desc.set)return;' +
+        'Object.defineProperty(proto,attr,{' +
+          'get:desc.get,' +
+          'set:function(v){' +
+            'try{' +
+              'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)&&v.indexOf(SELF_ORIGIN)!==0){' +
+                'v=toProxy(v);' +
+              '}' +
+            '}catch(e){}' +
+            'return desc.set.call(this,v);' +
+          '},' +
+          'configurable:true' +
+        '});' +
+      '}' +
+      'patchSrcProp(HTMLScriptElement.prototype,"src");' +
+      'patchSrcProp(HTMLImageElement.prototype,"src");' +
+      'patchSrcProp(HTMLIFrameElement.prototype,"src");' +
+      'patchSrcProp(HTMLLinkElement.prototype,"href");' +
+    '}catch(e){}' +
+    'try{' +
+      'var seenEls=new WeakSet();' +
+      'var pending=new Set();' +
+      'var scheduled=false;' +
+      'function rewriteEl(el){' +
+        'if(!el||!el.getAttribute||seenEls.has(el))return;' +
+        'seenEls.add(el);' +
+        'var tag=el.tagName;' +
+        'if(tag==="A"&&el.getAttribute("target")==="_blank"){' +
+          'var style=el.style;' +
+          'if(style&&(style.display==="none"||style.visibility==="hidden")){' +
+            'el.removeAttribute("target");' +
+          '}' +
+          'return;' +
+        '}' +
+        'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"){' +
+          'var src=el.getAttribute("src");' +
+          'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(SELF_ORIGIN)!==0){' +
+            'el.setAttribute("src",toProxy(src));' +
+          '}' +
+          'return;' +
+        '}' +
+        'if(tag==="LINK"){' +
+          'var href=el.getAttribute("href");' +
+          'if(href&&/^https?:\\/\\//i.test(href)&&href.indexOf(SELF_ORIGIN)!==0){' +
+            'el.setAttribute("href",toProxy(href));' +
+          '}' +
+        '}' +
+      '}' +
+      'var flushBudgetMs=8;' +
+      'var observerDisabled=false;' +
+      'var mo;' +
+      'function flush(){' +
+        'scheduled=false;' +
+        'var start=performance.now();' +
+        'pending.forEach(function(n){' +
+          'if(!n.isConnected)return;' +
+          'rewriteEl(n);' +
+          'if(n.querySelectorAll){' +
+            'var found=n.querySelectorAll("script[src],img[src],iframe[src],link[href],a[target=_blank]");' +
+            'for(var i=0;i<found.length;i++)rewriteEl(found[i]);' +
+          '}' +
+        '});' +
+        'pending.clear();' +
+        'if(performance.now()-start>flushBudgetMs*4&&mo){' +
+          'observerDisabled=true;mo.disconnect();' +
+          'console.warn("[sandbox] MutationObserver disabled \u2014 flush() exceeded budget");' +
+        '}' +
+      '}' +
+      'function schedule(){' +
+        'if(scheduled)return;scheduled=true;' +
+        '(window.requestIdleCallback||window.requestAnimationFrame)(flush);' +
+      '}' +
+      'mo=new MutationObserver(function(muts){' +
+        'if(observerDisabled)return;' +
+        'for(var i=0;i<muts.length;i++){' +
+          'var m=muts[i];' +
+          'if(m.type==="attributes"){pending.add(m.target);continue;}' +
+          'var added=m.addedNodes;' +
+          'for(var j=0;j<added.length;j++){if(added[j].nodeType===1)pending.add(added[j]);}' +
+        '}' +
+        'if(pending.size)schedule();' +
+      '});' +
+      'mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
+    '}catch(e){}' +
+  '}' +
 '})();</script>';
 
 // JS source rewriter: rewrites `location.href =`, `location =`, `document.location =`
@@ -615,7 +583,7 @@ async function handleRequest(request) {
   // strip headers, block ads, block nav, rewrite inline JS scripts.
   var pageHtml;
   try {
-    pageHtml = await rewriteIframesAndAssets(resp, resp.url, url.origin);
+    pageHtml = await rewriteIframesAndAssets(await resp.clone().text(), resp.url, url.origin);
   } catch(err) {
     // Fallback to plain text() if HTMLRewriter fails
     try {
@@ -629,7 +597,7 @@ async function handleRequest(request) {
   // Use resp.url (final URL after redirects) for <base> so assets resolve correctly
   pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
-  pageHtml = injectInHead(pageHtml, NAV_BLOCKER);
+  pageHtml = injectInHead(pageHtml, SANDBOX_SCRIPT);
   // Rewrite navigation calls in inline <script> blocks
   pageHtml = rewriteInlineScripts(pageHtml);
 
