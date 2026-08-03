@@ -248,6 +248,9 @@ var NAV_BLOCKER = '<script>(function(){' +
     'var seenEls=new WeakSet();' +
     'var pending=new Set();' +
     'var scheduled=false;' +
+    'var flushBudgetMs=8;' +
+    'var observerDisabled=false;' +
+    'var mo;' +
     'function rewriteEl(el){' +
       'if(!el||!el.getAttribute||seenEls.has(el))return;' +
       'seenEls.add(el);' +
@@ -275,23 +278,29 @@ var NAV_BLOCKER = '<script>(function(){' +
     '}' +
     'function flush(){' +
       'scheduled=false;' +
+      'var start=performance.now();' +
       'pending.forEach(function(n){' +
         'if(!n.isConnected)return;' +
         'rewriteEl(n);' +
-        'if(n.tagName==="SCRIPT"||n.tagName==="IMG"||n.tagName==="IFRAME"||n.tagName==="LINK"||n.tagName==="A"){}' +
-        'else if(n.querySelectorAll){' +
+        'if(n.querySelectorAll){' +
           'var found=n.querySelectorAll("script[src],img[src],iframe[src],link[href],a[target=_blank]");' +
           'for(var i=0;i<found.length;i++)rewriteEl(found[i]);' +
         '}' +
       '});' +
       'pending.clear();' +
+      'if(performance.now()-start>flushBudgetMs*4&&mo){' +
+        'observerDisabled=true;' +
+        'mo.disconnect();' +
+        'console.warn("[sandbox] MutationObserver disabled \u2014 flush() exceeded budget, likely causing page hang");' +
+      '}' +
     '}' +
     'function schedule(){' +
       'if(scheduled)return;' +
       'scheduled=true;' +
       '(window.requestIdleCallback||window.requestAnimationFrame)(flush);' +
     '}' +
-    'new MutationObserver(function(muts){' +
+    'mo=new MutationObserver(function(muts){' +
+      'if(observerDisabled)return;' +
       'for(var i=0;i<muts.length;i++){' +
         'var m=muts[i];' +
         'if(m.type==="attributes"){pending.add(m.target);continue;}' +
@@ -302,7 +311,8 @@ var NAV_BLOCKER = '<script>(function(){' +
         '}' +
       '}' +
       'if(pending.size)schedule();' +
-    '}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
+    '});' +
+    'mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
   '}catch(e){}' +
   // 9. Navigation API — catches location.href=, assign(), replace(), everything
   // Supported in Chrome/Edge. Falls back to the polling for Firefox/Safari.
