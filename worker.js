@@ -87,7 +87,6 @@ function injectInHead(html, content) {
   return content + html;
 }
 
-// Server-side HTML rewriter using Cloudflare's HTMLRewriter API.
 class SrcAttrRewriter {
   constructor(baseURL, workerOrigin, attr) {
     this.baseURL = baseURL;
@@ -135,12 +134,11 @@ function blockAdsInHTML(html) {
 
 var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r)})();</script>';
 
-// OPTIMIZED Navigation blocker - reduced overhead for games
+// ULTRA OPTIMIZED Navigation blocker with game detection
 var NAV_BLOCKER = '<script>(function(){' +
   'var ORIGIN=self.location.origin;' +
-  'var isProcessing=false;' +
-  'var rewriteQueue=[];' +
-  'var queueTimer=null;' +
+  'var GAME_MODE=false;' +
+  'var gameModeTimer=null;' +
   
   'function toProxy(u){' +
     'try{' +
@@ -154,7 +152,7 @@ var NAV_BLOCKER = '<script>(function(){' +
   'try{' +
     'if(navigator.serviceWorker){' +
       'navigator.serviceWorker.register=function(){' +
-        'return Promise.reject(new Error("ServiceWorker registration blocked by sandbox"));' +
+        'return Promise.reject(new Error("ServiceWorker registration blocked"));' +
       '};' +
       'navigator.serviceWorker.getRegistrations&&navigator.serviceWorker.getRegistrations().then(function(regs){' +
         'regs.forEach(function(r){r.unregister();});' +
@@ -177,7 +175,7 @@ var NAV_BLOCKER = '<script>(function(){' +
     'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
   '}catch(e){}' +
   
-  // Patch window.open with throttling
+  // Patch window.open
   'try{' +
     'var _open=window.open;' +
     'var lastGesture=0;' +
@@ -196,7 +194,7 @@ var NAV_BLOCKER = '<script>(function(){' +
     'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
   '}catch(e){}' +
   
-  // OPTIMIZED: Batch fetch/XHR rewrites
+  // Patch fetch - lightweight
   'try{' +
     'var _fetch=window.fetch;' +
     'window.fetch=function(input,init){' +
@@ -210,6 +208,7 @@ var NAV_BLOCKER = '<script>(function(){' +
     '};' +
   '}catch(e){}' +
   
+  // Patch XHR - lightweight
   'try{' +
     'var _xhrOpen=XMLHttpRequest.prototype.open;' +
     'XMLHttpRequest.prototype.open=function(method,url){' +
@@ -222,6 +221,7 @@ var NAV_BLOCKER = '<script>(function(){' +
     '};' +
   '}catch(e){}' +
   
+  // Patch sendBeacon
   'try{' +
     'var _beacon=navigator.sendBeacon;' +
     'navigator.sendBeacon=function(url,data){' +
@@ -232,70 +232,102 @@ var NAV_BLOCKER = '<script>(function(){' +
     '};' +
   '}catch(e){}' +
   
-  // OPTIMIZED: Debounced MutationObserver with batching
-  'try{' +
-    'function shouldRewrite(el){' +
-      'if(!el||!el.getAttribute||!el.tagName)return false;' +
-      'var tag=el.tagName;' +
-      'return tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"||tag==="LINK"||tag==="SOURCE"||tag==="VIDEO"||tag==="AUDIO"||tag==="A";' +
-    '}' +
-    
-    'function rewriteEl(el){' +
-      'if(!shouldRewrite(el))return;' +
-      'var tag=el.tagName;' +
-      'if(tag==="A"&&el.getAttribute("target")==="_blank"){' +
-        'var st=el.style;' +
-        'if(st&&(st.display==="none"||st.visibility==="hidden")){' +
-          'el.removeAttribute("target");' +
-        '}' +
-      '}' +
-      'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"||tag==="LINK"||tag==="SOURCE"||tag==="VIDEO"||tag==="AUDIO"){' +
-        'var src=el.getAttribute("src")||el.getAttribute("href");' +
-        'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
-          'if(tag==="LINK")el.setAttribute("href",toProxy(src));' +
-          'else el.setAttribute("src",toProxy(src));' +
+  // GAME DETECTION: Check for canvas/WebGL and disable heavy operations
+  'function checkForGame(){' +
+    'var canvases=document.querySelectorAll("canvas");' +
+    'if(canvases.length>0){' +
+      'for(var i=0;i<canvases.length;i++){' +
+        'var c=canvases[i];' +
+        'if(c.width>100&&c.height>100){' +
+          'GAME_MODE=true;' +
+          'return true;' +
         '}' +
       '}' +
     '}' +
-    
-    'function processQueue(){' +
-      'if(isProcessing)return;' +
-      'isProcessing=true;' +
-      'var batch=rewriteQueue.splice(0,50);' +
-      'batch.forEach(function(el){try{rewriteEl(el)}catch(e){}});' +
-      'isProcessing=false;' +
-      'if(rewriteQueue.length>0)requestAnimationFrame(processQueue);' +
-      'else queueTimer=null;' +
-    '}' +
-    
-    'function queueElement(el){' +
-      'if(rewriteQueue.indexOf(el)===-1){' +
-        'rewriteQueue.push(el);' +
-        'if(!queueTimer){' +
-          'queueTimer=requestAnimationFrame(processQueue);' +
-        '}' +
-      '}' +
-    '}' +
-    
-    'new MutationObserver(function(muts){' +
-      'muts.forEach(function(m){' +
-        'if(m.addedNodes){' +
-          'm.addedNodes.forEach(function(n){' +
-            'if(n.nodeType===1){' +
-              'if(shouldRewrite(n))queueElement(n);' +
-              'if(n.querySelectorAll){' +
-                'var children=n.querySelectorAll("script,img,iframe,link,source,video,audio,a");' +
-                'children.forEach(queueElement);' +
+    'return false;' +
+  '}' +
+  
+  // Ultra lightweight MutationObserver - ONLY runs when NOT in game mode
+  'var observer=null;' +
+  'var pendingMutations=[];' +
+  'var processTimer=null;' +
+  
+  'function processMutations(){' +
+    'if(GAME_MODE){pendingMutations=[];return;}' +
+    'var batch=pendingMutations.splice(0,100);' +
+    'batch.forEach(function(m){' +
+      'if(m.addedNodes){' +
+        'm.addedNodes.forEach(function(n){' +
+          'if(n.nodeType===1&&n.tagName){' +
+            'var tag=n.tagName;' +
+            'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"||tag==="LINK"){' +
+              'var src=n.getAttribute("src")||n.getAttribute("href");' +
+              'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
+                'if(tag==="LINK")n.setAttribute("href",toProxy(src));' +
+                'else n.setAttribute("src",toProxy(src));' +
               '}' +
             '}' +
-          '});' +
-        '}' +
-        'if(m.type==="attributes"&&m.target.nodeType===1){' +
-          'queueElement(m.target);' +
-        '}' +
-      '});' +
-    '}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href","target"]});' +
-  '}catch(e){}' +
+            'if(n.querySelectorAll){' +
+              'var children=n.querySelectorAll("script,img,iframe,link");' +
+              'children.forEach(function(c){' +
+                'var tag=c.tagName;' +
+                'var src=c.getAttribute("src")||c.getAttribute("href");' +
+                'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
+                  'if(tag==="LINK")c.setAttribute("href",toProxy(src));' +
+                  'else c.setAttribute("src",toProxy(src));' +
+                '}' +
+              '});' +
+            '}' +
+          '}' +
+        '});' +
+      '}' +
+    '});' +
+    'if(pendingMutations.length>0){' +
+      'processTimer=requestIdleCallback(processMutations,{timeout:100});' +
+    '}else{' +
+      'processTimer=null;' +
+    '}' +
+  '}' +
+  
+  'function startObserver(){' +
+    'if(observer||GAME_MODE)return;' +
+    'observer=new MutationObserver(function(muts){' +
+      'if(GAME_MODE)return;' +
+      'muts.forEach(function(m){pendingMutations.push(m);});' +
+      'if(!processTimer){' +
+        'processTimer=requestIdleCallback(processMutations,{timeout:100});' +
+      '}' +
+    '});' +
+    'observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
+  '}' +
+  
+  'function stopObserver(){' +
+    'if(observer){' +
+      'observer.disconnect();' +
+      'observer=null;' +
+    '}' +
+    'if(processTimer){' +
+      'cancelIdleCallback(processTimer);' +
+      'processTimer=null;' +
+    '}' +
+    'pendingMutations=[];' +
+  '}' +
+  
+  // Check for game every 2 seconds and adjust mode
+  'function gameCheckLoop(){' +
+    'var wasGameMode=GAME_MODE;' +
+    'GAME_MODE=checkForGame();' +
+    'if(GAME_MODE&&!wasGameMode){' +
+      'stopObserver();' +
+    '}else if(!GAME_MODE&&wasGameMode){' +
+      'startObserver();' +
+    '}' +
+    'gameModeTimer=setTimeout(gameCheckLoop,2000);' +
+  '}' +
+  
+  // Start observer initially
+  'startObserver();' +
+  'gameCheckLoop();' +
   
   // Navigation API
   'try{' +
@@ -311,29 +343,7 @@ var NAV_BLOCKER = '<script>(function(){' +
     '}' +
   '}catch(e){}' +
   
-  // OPTIMIZED: Throttled property setters
-  'try{' +
-    'function patchSrcProp(proto,attr){' +
-      'var desc=Object.getOwnPropertyDescriptor(proto,attr);' +
-      'if(!desc||!desc.set)return;' +
-      'Object.defineProperty(proto,attr,{' +
-        'get:desc.get,' +
-        'set:function(v){' +
-          'try{' +
-            'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)&&v.indexOf(ORIGIN)!==0){' +
-              'v=toProxy(v);' +
-            '}' +
-          '}catch(e){}' +
-          'return desc.set.call(this,v);' +
-        '},' +
-        'configurable:true' +
-      '});' +
-    '}' +
-    'patchSrcProp(HTMLScriptElement.prototype,"src");' +
-    'patchSrcProp(HTMLImageElement.prototype,"src");' +
-    'patchSrcProp(HTMLIFrameElement.prototype,"src");' +
-    'patchSrcProp(HTMLLinkElement.prototype,"href");' +
-  '}catch(e){}' +
+  // REMOVED patchSrcProp - too heavy for games, server-side rewrite handles it
   
   // Click handler
   'document.addEventListener("click",function(e){' +
