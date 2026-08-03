@@ -1,9 +1,8 @@
 /**
  * HyperZProxy — Universal reverse proxy with CloudMoon iframe + ad blocking
- * OPTIMIZED FOR GAMES - v3.0
  */
 
-// Proxy target
+// Proxy target — split into fragments and assembled at runtime.
 var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
 var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
 
@@ -19,13 +18,6 @@ var AD_PATTERNS = [
   'adsafeprotected.com', 'moatads.com', 'scorecardresearch.com',
   '/ads/', '/ad/', '/advert/', '/advertisement/', '/adsense/',
   '/adserver/', '/analytics/', 'prebid', 'advertis', 'banner', 'popup'
-];
-
-// Game sites that need ultra-lightweight mode
-var GAME_DOMAINS = [
-  'crazygames.com', 'poki.com', 'miniclip.com', 'kongregate.com',
-  'newgrounds.com', 'armorgames.com', 'y8.com', 'friv.com',
-  'clickgames.com', 'gamepix.com', 'gamegarden.com'
 ];
 
 function isAdRequest(u) {
@@ -95,6 +87,11 @@ function injectInHead(html, content) {
   return content + html;
 }
 
+// Server-side HTML rewriter using Cloudflare's HTMLRewriter API.
+// Rewrites iframe/src, script/src, img/src, link/href in the initial HTML
+// to go through /proxy/ before the browser starts loading them. This catches
+// assets present at initial load — the MutationObserver only catches ones
+// injected later by JS.
 class SrcAttrRewriter {
   constructor(baseURL, workerOrigin, attr) {
     this.baseURL = baseURL;
@@ -106,10 +103,17 @@ class SrcAttrRewriter {
     if (!src) return;
     if (src.indexOf('data:') === 0 || src.indexOf('blob:') === 0) return;
     if (src.indexOf('javascript:') === 0) return;
+    // Skip if already a proxy URL
     if (src.indexOf('/proxy/') === 0) return;
     var abs;
     try { abs = new URL(src, this.baseURL); } catch(e) { return; }
     if (abs.protocol === 'data:' || abs.protocol === 'blob:') return;
+    // Use ABSOLUTE URL to the Worker so it doesn't get resolved against
+    // the <base href> tag (which points to the real site).
+    // Preserve real host/path structure (host/path?query) instead of
+    // encoding the whole URL into one opaque percent-encoded segment, so
+    // downstream code that does path math (webpack publicPath:'auto',
+    // relative imports, new URL('./x', import.meta.url)) keeps working.
     el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + abs.host + abs.pathname + abs.search);
   }
 }
@@ -140,85 +144,52 @@ function blockAdsInHTML(html) {
   return html;
 }
 
-var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style>';
+var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>';
 
-// ULTRA LIGHTWEIGHT for games - minimal overhead
-var NAV_BLOCKER_LIGHT = '<script>(function(){' +
+// Navigation blocker: intercepts runtime navigation attempts (location.assign,
+// location.replace, window.open, history.pushState/replaceState, <a> clicks)
+// and rewrites them to go through the proxy. Also neutralizes frame-busting
+// (top/parent redirect attempts). This covers what <base> can't — dynamic
+// JS-driven navigation. The one thing it CAN'T catch is `location.href =`
+// (non-configurable accessor) — for that, see the JS source rewriter below.
+var NAV_BLOCKER = '<script>(function(){' +
   'var ORIGIN=self.location.origin;' +
   'function toProxy(u){' +
     'try{' +
       'var abs=new URL(u,document.baseURI);' +
+      // Same-origin guard: never re-wrap a URL that already points at the
+      // Worker itself (prevents /proxy/worker-host/proxy/... double-wrap).
       'if(abs.origin===ORIGIN)return abs.href;' +
+      // Preserve real host/path structure so downstream path math works.
       'return ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
-  
-  // Only essential patches - no DOM manipulation
-  'try{' +
-    'if(window.top!==window.self){' +
-      'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
-      'Object.defineProperty(window,"parent",{get:function(){return window.self;}});' +
-    '}' +
-  '}catch(e){}' +
-  
-  'try{' +
-    'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
-    'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
-    'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
-  '}catch(e){}' +
-  
-  'try{' +
-    'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
-    'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
-    'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
-  '}catch(e){}' +
-  
-  // Click handler - use passive where possible
-  'document.addEventListener("click",function(e){' +
-    'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
-    'if(!a)return;' +
-    'var h=a.getAttribute("href")||"";' +
-    'if(!/^https?:\\/\\//i.test(h))return;' +
-    'e.preventDefault();' +
-    'var dest=toProxy(h);' +
-    'var tgt=a.getAttribute("target");' +
-    'if(tgt&&tgt!=="_self"){window.open(dest,"_blank","noopener,noreferrer");}' +
-    'else{window.location.href=dest;}' +
-  '},true);' +
-'})();</script>';
-
-// Full version for non-game sites
-var NAV_BLOCKER_FULL = '<script>(function(){' +
-  'var ORIGIN=self.location.origin;' +
-  'function toProxy(u){' +
-    'try{' +
-      'var abs=new URL(u,document.baseURI);' +
-      'if(abs.origin===ORIGIN)return abs.href;' +
-      'return ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
-    '}catch(e){return u;}' +
-  '}' +
-  
+  // 11. Kill Service Workers — they run in an isolated scope our patches
+  // can't reach, and will silently bypass the entire proxy layer.
   'try{' +
     'if(navigator.serviceWorker){' +
       'navigator.serviceWorker.register=function(){' +
-        'return Promise.reject(new Error("blocked"));' +
+        'return Promise.reject(new Error("ServiceWorker registration blocked by sandbox"));' +
       '};' +
+      'navigator.serviceWorker.getRegistrations&&navigator.serviceWorker.getRegistrations().then(function(regs){' +
+        'regs.forEach(function(r){r.unregister();});' +
+      '});' +
     '}' +
   '}catch(e){}' +
-  
+  // block frame-busting: neutralize top/parent redirect attempts
   'try{' +
     'if(window.top!==window.self){' +
       'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
       'Object.defineProperty(window,"parent",{get:function(){return window.self;}});' +
     '}' +
   '}catch(e){}' +
-  
+  // patch Location.prototype.assign / replace
   'try{' +
     'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
     'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
     'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
   '}catch(e){}' +
-  
+  // patch window.open — gate popups by user gesture (blocks ad popups from timers)
   'try{' +
     'var _open=window.open;' +
     'var lastGesture=0;' +
@@ -229,13 +200,13 @@ var NAV_BLOCKER_FULL = '<script>(function(){' +
       'return _open.call(window,u?toProxy(u):u,n,s);' +
     '};' +
   '}catch(e){}' +
-  
+  // patch history.pushState / replaceState so SPA nav stays proxied
   'try{' +
     'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
     'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
     'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
   '}catch(e){}' +
-  
+  // patch fetch() — route external URLs through the proxy
   'try{' +
     'var _fetch=window.fetch;' +
     'window.fetch=function(input,init){' +
@@ -248,7 +219,7 @@ var NAV_BLOCKER_FULL = '<script>(function(){' +
       'return _fetch.call(window,input,init);' +
     '};' +
   '}catch(e){}' +
-  
+  // patch XMLHttpRequest — route external URLs through the proxy
   'try{' +
     'var _xhrOpen=XMLHttpRequest.prototype.open;' +
     'XMLHttpRequest.prototype.open=function(method,url){' +
@@ -260,7 +231,120 @@ var NAV_BLOCKER_FULL = '<script>(function(){' +
       'return _xhrOpen.apply(this,args);' +
     '};' +
   '}catch(e){}' +
-  
+  // patch navigator.sendBeacon — route external URLs through the proxy
+  'try{' +
+    'var _beacon=navigator.sendBeacon;' +
+    'navigator.sendBeacon=function(url,data){' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
+        'url=toProxy(url);' +
+      '}' +
+      'return _beacon.call(navigator,url,data);' +
+    '};' +
+  '}catch(e){}' +
+  // 8. Rewrite dynamically-injected script/img/iframe/link src before load —
+  // batched via rAF/idleCallback and deduped so high-frequency game DOM churn
+  // doesn't block the main thread (was causing RESULT_CODE_HUNG).
+  'try{' +
+    'var seenEls=new WeakSet();' +
+    'var pending=new Set();' +
+    'var scheduled=false;' +
+    'function rewriteEl(el){' +
+      'if(!el||!el.getAttribute||seenEls.has(el))return;' +
+      'seenEls.add(el);' +
+      'var tag=el.tagName;' +
+      'if(tag==="A"&&el.getAttribute("target")==="_blank"){' +
+        'var style=el.style;' +
+        'if(style&&(style.display==="none"||style.visibility==="hidden")){' +
+          'el.removeAttribute("target");' +
+        '}' +
+        'return;' +
+      '}' +
+      'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"){' +
+        'var src=el.getAttribute("src");' +
+        'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
+          'el.setAttribute("src",toProxy(src));' +
+        '}' +
+        'return;' +
+      '}' +
+      'if(tag==="LINK"){' +
+        'var href=el.getAttribute("href");' +
+        'if(href&&/^https?:\\/\\//i.test(href)&&href.indexOf(ORIGIN)!==0){' +
+          'el.setAttribute("href",toProxy(href));' +
+        '}' +
+      '}' +
+    '}' +
+    'function flush(){' +
+      'scheduled=false;' +
+      'pending.forEach(function(n){' +
+        'if(!n.isConnected)return;' +
+        'rewriteEl(n);' +
+        'if(n.tagName==="SCRIPT"||n.tagName==="IMG"||n.tagName==="IFRAME"||n.tagName==="LINK"||n.tagName==="A"){}' +
+        'else if(n.querySelectorAll){' +
+          'var found=n.querySelectorAll("script[src],img[src],iframe[src],link[href],a[target=_blank]");' +
+          'for(var i=0;i<found.length;i++)rewriteEl(found[i]);' +
+        '}' +
+      '});' +
+      'pending.clear();' +
+    '}' +
+    'function schedule(){' +
+      'if(scheduled)return;' +
+      'scheduled=true;' +
+      '(window.requestIdleCallback||window.requestAnimationFrame)(flush);' +
+    '}' +
+    'new MutationObserver(function(muts){' +
+      'for(var i=0;i<muts.length;i++){' +
+        'var m=muts[i];' +
+        'if(m.type==="attributes"){pending.add(m.target);continue;}' +
+        'var added=m.addedNodes;' +
+        'for(var j=0;j<added.length;j++){' +
+          'var n=added[j];' +
+          'if(n.nodeType===1)pending.add(n);' +
+        '}' +
+      '}' +
+      'if(pending.size)schedule();' +
+    '}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
+  '}catch(e){}' +
+  // 9. Navigation API — catches location.href=, assign(), replace(), everything
+  // Supported in Chrome/Edge. Falls back to the polling for Firefox/Safari.
+  'try{' +
+    'if(window.navigation){' +
+      'navigation.addEventListener("navigate",function(e){' +
+        'var dest=e.destination&&e.destination.url;' +
+        'if(!dest)return;' +
+        'if(dest.indexOf(ORIGIN)!==0){' +
+          'e.preventDefault();' +
+          'window.location.href=toProxy(dest);' +
+        '}' +
+      '});' +
+    '}' +
+  '}catch(e){}' +
+  // 10. Patch src/href property setters directly — closes the race
+  // between dynamic script/link creation and the MutationObserver.
+  // The observer is async/batched; property setters fire synchronously
+  // the instant JS sets .src, before any network activity starts.
+  'try{' +
+    'function patchSrcProp(proto,attr){' +
+      'var desc=Object.getOwnPropertyDescriptor(proto,attr);' +
+      'if(!desc||!desc.set)return;' +
+      'Object.defineProperty(proto,attr,{' +
+        'get:desc.get,' +
+        'set:function(v){' +
+          'try{' +
+            'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)&&v.indexOf(ORIGIN)!==0){' +
+              'v=toProxy(v);' +
+            '}' +
+          '}catch(e){}' +
+          'return desc.set.call(this,v);' +
+        '},' +
+        'configurable:true' +
+      '});' +
+    '}' +
+    'patchSrcProp(HTMLScriptElement.prototype,"src");' +
+    'patchSrcProp(HTMLImageElement.prototype,"src");' +
+    'patchSrcProp(HTMLIFrameElement.prototype,"src");' +
+    'patchSrcProp(HTMLLinkElement.prototype,"href");' +
+  '}catch(e){}' +
+  // catch <a> clicks — handle target=_blank via controlled window.open
   'document.addEventListener("click",function(e){' +
     'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
     'if(!a)return;' +
@@ -274,18 +358,33 @@ var NAV_BLOCKER_FULL = '<script>(function(){' +
   '},true);' +
 '})();</script>';
 
+// JS source rewriter: rewrites `location.href =`, `location =`, `document.location =`
+// in JavaScript source to go through the proxy. This is the ONLY way to catch
+// the non-configurable `location.href` setter — rewrite the source code itself.
+// Applied to both inline <script> blocks in HTML and external .js responses.
 function rewriteJsSource(js) {
+  // Rewrite: location.href = "url" → location.href = "/proxy/encoded"
+  // Rewrite: location = "url" → location.href = "/proxy/encoded"
+  // Rewrite: document.location = "url" → document.location = "/proxy/encoded"
+  // Rewrite: window.location = "url" → window.location = "/proxy/encoded"
+  // We rewrite assignment targets, not reads, to avoid breaking code that
+  // reads location.href for comparison.
+
+  // Pattern: (location|location.href|document.location|window.location)\s*=\s*("..."|'...'|`...`)
   var assignPattern = /((?:window\.|document\.)?location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\2/gi;
   js = js.replace(assignPattern, function(match, target, quote, url) {
+    // Only rewrite if it's an absolute URL (has ://)
     if (/^https?:\/\//i.test(url)) {
       return target + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
     }
+    // Protocol-relative URLs (//example.com)
     if (url.indexOf('//') === 0) {
       return target + ' = ' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
     }
     return match;
   });
 
+  // Rewrite: location.assign("url") and location.replace("url")
   var methodPattern = /((?:window\.|document\.)?location)\.(assign|replace)\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3\s*\)/gi;
   js = js.replace(methodPattern, function(match, loc, method, quote, url) {
     if (/^https?:\/\//i.test(url)) {
@@ -297,6 +396,7 @@ function rewriteJsSource(js) {
     return match;
   });
 
+  // Rewrite: window.open("url", ...)
   var openPattern = /window\.open\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\1/gi;
   js = js.replace(openPattern, function(match, quote, url) {
     if (/^https?:\/\//i.test(url)) {
@@ -308,6 +408,7 @@ function rewriteJsSource(js) {
     return match;
   });
 
+  // Rewrite: top.location = "url" and parent.location = "url"
   var topPattern = /(top|parent)\.(location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3/gi;
   js = js.replace(topPattern, function(match, scope, loc, quote, url) {
     if (/^https?:\/\//i.test(url)) {
@@ -319,10 +420,14 @@ function rewriteJsSource(js) {
   return js;
 }
 
+// Rewrite inline <script> blocks in HTML
 function rewriteInlineScripts(html) {
   return html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, function(match, attrs, content) {
+    // Skip scripts with src attribute (external scripts)
     if (/\bsrc\s*=/i.test(attrs)) return match;
+    // Skip empty scripts
     if (!content.trim()) return match;
+    // Rewrite the JS source
     var rewritten = rewriteJsSource(content);
     return '<script' + attrs + '>' + rewritten + '</script>';
   });
@@ -332,6 +437,11 @@ function parseUniversalURL(pathname, search) {
   var targetPath = pathname.charAt(0) === '/' ? pathname.slice(1) : pathname;
   if (!targetPath) return null;
   if (targetPath.indexOf('proxy/') === 0) {
+    // Reconstruct from host+path (new style: /proxy/host/path?query) OR
+    // from a fully-encoded blob (old style: /proxy/https%3A%2F%2F...).
+    // Backward-compatible: old-style URLs still contain '://' after
+    // decoding and pass through unchanged; new-style 'host/path' URLs get
+    // 'https://' prepended.
     var rest = targetPath.substring(6);
     var d;
     try { d = decodeURIComponent(rest); } catch(e) { d = rest; }
@@ -358,18 +468,11 @@ function parseUniversalURL(pathname, search) {
   return search ? 'https://' + targetURL + search : 'https://' + targetURL;
 }
 
-function isGameSite(url) {
-  var hostname = (url.hostname || '').toLowerCase();
-  for (var i = 0; i < GAME_DOMAINS.length; i++) {
-    if (hostname.indexOf(GAME_DOMAINS[i]) !== -1) return true;
-  }
-  return false;
-}
-
 async function handleRequest(request) {
   var url = new URL(request.url);
   var pathname = url.pathname;
 
+  // CORS preflight
   if (request.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -382,6 +485,7 @@ async function handleRequest(request) {
     });
   }
 
+  // CloudMoon: full-screen iframe to the classroom proxy
   if (isCloudMoonPath(pathname)) {
     var targetPath = pathname + url.search;
     var _d = ['app', 'com'], _n = 'cloudmoon', _w = 'web';
@@ -415,6 +519,7 @@ async function handleRequest(request) {
     });
   }
 
+  // Normal proxy: direct-fetch
   var targetURL = parseUniversalURL(pathname, url.search);
   if (!targetURL) {
     return new Response('Invalid URL', { status: 400 });
@@ -427,6 +532,9 @@ async function handleRequest(request) {
     return new Response('', { status: 204 });
   }
 
+  // Fetch the target — forward the original request's method, body, and headers
+  // so POST/PUT requests (sign-up forms, API calls, etc.) work correctly.
+  // Use redirect:'follow' so Workers follows redirects automatically.
   var fwdHeaders = new Headers(request.headers);
   fwdHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
   fwdHeaders.delete('Host');
@@ -462,14 +570,15 @@ async function handleRequest(request) {
   }
 
   var contentType = (resp.headers.get('Content-Type') || '').toLowerCase();
-  var targetUrlObj = new URL(targetURL);
-  var isGame = isGameSite(targetUrlObj);
 
+  // Non-HTML: pass through with CORS + stripped security headers.
+  // For JavaScript responses, also rewrite navigation calls in the source.
   if (contentType.indexOf('text/html') === -1) {
     var passH = new Headers(resp.headers);
     passH.set('Access-Control-Allow-Origin', '*');
     stripSecurityHeaders(passH);
 
+    // Rewrite JS source for navigation calls
     if (contentType.indexOf('javascript') !== -1) {
       try {
         var jsSource = await resp.text();
@@ -479,6 +588,7 @@ async function handleRequest(request) {
           status: resp.status, statusText: resp.statusText, headers: passH
         });
       } catch(e) {
+        // If JS rewrite fails, pass through the original
       }
     }
 
@@ -490,10 +600,14 @@ async function handleRequest(request) {
     });
   }
 
+  // HTML: use HTMLRewriter to rewrite iframe/script/img/link src server-side
+  // (catches assets in initial HTML before JS runs), then inject <base>,
+  // strip headers, block ads, block nav, rewrite inline JS scripts.
   var pageHtml;
   try {
     pageHtml = await rewriteIframesAndAssets(resp, resp.url, url.origin);
   } catch(err) {
+    // Fallback to plain text() if HTMLRewriter fails
     try {
       pageHtml = await resp.text();
     } catch(err2) {
@@ -502,16 +616,11 @@ async function handleRequest(request) {
   }
 
   pageHtml = blockAdsInHTML(pageHtml);
+  // Use resp.url (final URL after redirects) for <base> so assets resolve correctly
   pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
-  
-  // Use lightweight blocker for game sites
-  if (isGame) {
-    pageHtml = injectInHead(pageHtml, NAV_BLOCKER_LIGHT);
-  } else {
-    pageHtml = injectInHead(pageHtml, NAV_BLOCKER_FULL);
-  }
-  
+  pageHtml = injectInHead(pageHtml, NAV_BLOCKER);
+  // Rewrite navigation calls in inline <script> blocks
   pageHtml = rewriteInlineScripts(pageHtml);
 
   var htmlH = new Headers(resp.headers);
@@ -526,6 +635,8 @@ async function handleRequest(request) {
   });
 }
 
+// Cloudflare Workers entry point — wrapped in try/catch so any error
+// returns a readable message instead of Error 1101.
 export default {
   async fetch(request, env, ctx) {
     try {
