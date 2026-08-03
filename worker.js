@@ -156,6 +156,18 @@ var NAV_BLOCKER = '<script>(function(){' +
       'return ORIGIN+"/proxy/"+encodeURIComponent(abs);' +
     '}catch(e){return u;}' +
   '}' +
+  // 11. Kill Service Workers — they run in an isolated scope our patches
+  // can't reach, and will silently bypass the entire proxy layer.
+  'try{' +
+    'if(navigator.serviceWorker){' +
+      'navigator.serviceWorker.register=function(){' +
+        'return Promise.reject(new Error("ServiceWorker registration blocked by sandbox"));' +
+      '};' +
+      'navigator.serviceWorker.getRegistrations&&navigator.serviceWorker.getRegistrations().then(function(regs){' +
+        'regs.forEach(function(r){r.unregister();});' +
+      '});' +
+    '}' +
+  '}catch(e){}' +
   // block frame-busting: neutralize top/parent redirect attempts
   'try{' +
     'if(window.top!==window.self){' +
