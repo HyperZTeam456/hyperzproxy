@@ -1,3 +1,8 @@
+/**
+ * HyperZProxy — Universal reverse proxy with CloudMoon iframe + ad blocking
+ */
+
+// Proxy target — split into fragments and assembled at runtime.
 var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
 var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
 
@@ -170,6 +175,43 @@ var NAV_BLOCKER = '<script>(function(){' +
       '}' +
       'return _beacon.call(navigator,url,data);' +
     '};' +
+  '}catch(e){}' +
+  // 8. Rewrite dynamically-injected script/img/iframe src before they load
+  'try{' +
+    'function rewriteEl(el){' +
+      'if(!el||!el.getAttribute)return;' +
+      'var tag=el.tagName;' +
+      'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"||tag==="LINK"||tag==="SOURCE"||tag==="VIDEO"||tag==="AUDIO"){' +
+        'var src=el.getAttribute("src")||el.getAttribute("href");' +
+        'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
+          'if(tag==="LINK")el.setAttribute("href",toProxy(src));' +
+          'else el.setAttribute("src",toProxy(src));' +
+        '}' +
+      '}' +
+    '}' +
+    'new MutationObserver(function(muts){' +
+      'muts.forEach(function(m){' +
+        'm.addedNodes&&m.addedNodes.forEach(function(n){' +
+          'rewriteEl(n);' +
+          'if(n.querySelectorAll){n.querySelectorAll("script,img,iframe,link,source,video,audio").forEach(rewriteEl);}' +
+        '});' +
+        'if(m.type==="attributes")rewriteEl(m.target);' +
+      '});' +
+    '}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
+  '}catch(e){}' +
+  // 9. Navigation API — catches location.href=, assign(), replace(), everything
+  // Supported in Chrome/Edge. Falls back to the polling for Firefox/Safari.
+  'try{' +
+    'if(window.navigation){' +
+      'navigation.addEventListener("navigate",function(e){' +
+        'var dest=e.destination&&e.destination.url;' +
+        'if(!dest)return;' +
+        'if(dest.indexOf(ORIGIN)!==0){' +
+          'e.preventDefault();' +
+          'window.location.href=toProxy(dest);' +
+        '}' +
+      '});' +
+    '}' +
   '}catch(e){}' +
   // catch plain <a> clicks with absolute hrefs to the real origin
   'document.addEventListener("click",function(e){' +
