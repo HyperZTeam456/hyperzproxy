@@ -134,7 +134,16 @@ var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a
 
 var SANDBOX_SCRIPT = '<script>(function(){' +
   'var SELF_ORIGIN=self.location.origin;' +
-  'var IS_TOP_FRAME=(window.self===window.top);' +
+  'var RUN_HEAVY=true;' +
+  'try{' +
+    'if(window.self!==window.top){' +
+      'if(window.top.location.origin===SELF_ORIGIN){' +
+        'RUN_HEAVY=false;' + // nested inside another HyperZProxy frame — lightweight only
+      '}' +
+    '}' +
+  '}catch(e){' +
+    'RUN_HEAVY=true;' + // top is cross-origin — we're embedded on someone else's site, stay full-featured
+  '}' +
   'function toProxy(u){' +
     'try{' +
       'var abs=new URL(u,document.baseURI);' +
@@ -211,8 +220,11 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
     '}' +
   '},true);' +
 
-  // --- heavy patches: TOP FRAME ONLY, to avoid doubling up inside the game iframe ---
-  'if(IS_TOP_FRAME){' +
+  // --- heavy patches: skipped when nested inside another HyperZProxy frame
+  // (same-origin top) to avoid doubling up inside the game iframe. Full sandbox
+  // runs when we're top-level OR embedded on a third-party site (cross-origin
+  // top throws on window.top.location.origin, which leaves RUN_HEAVY=true).
+  'if(RUN_HEAVY){' +
     'try{' +
       'if(window.top!==window.self){' +
         'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
