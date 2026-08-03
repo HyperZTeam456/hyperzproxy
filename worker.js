@@ -136,13 +136,11 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   'var SELF_ORIGIN=self.location.origin;' +
   'var RUN_HEAVY=true;' +
   'try{' +
-    'if(window.self!==window.top){' +
-      'if(window.top.location.origin===SELF_ORIGIN){' +
-        'RUN_HEAVY=false;' + // nested inside another HyperZProxy frame — lightweight only
-      '}' +
+    'if(window.self!==window.parent){' +
+      'RUN_HEAVY=(window.parent.location.origin!==SELF_ORIGIN);' +
     '}' +
   '}catch(e){' +
-    'RUN_HEAVY=true;' + // top is cross-origin — we're embedded on someone else's site, stay full-featured
+    'RUN_HEAVY=true;' + // parent is cross-origin — we don't know who embedded us, stay safe and full-featured
   '}' +
   'function toProxy(u){' +
     'try{' +
@@ -220,10 +218,12 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
     '}' +
   '},true);' +
 
-  // --- heavy patches: skipped when nested inside another HyperZProxy frame
-  // (same-origin top) to avoid doubling up inside the game iframe. Full sandbox
-  // runs when we're top-level OR embedded on a third-party site (cross-origin
-  // top throws on window.top.location.origin, which leaves RUN_HEAVY=true).
+  // --- heavy patches: skipped when the DIRECT PARENT is another HyperZProxy
+  // frame (same-origin parent) to avoid doubling up inside the game iframe.
+  // Full sandbox runs when we're top-level, OR when our parent is a different
+  // origin (third-party embed), OR when the parent is cross-origin and throws
+  // (unreadable — safe default). Each frame only checks its own parent, so this
+  // is correct at any nesting depth.
   'if(RUN_HEAVY){' +
     'try{' +
       'if(window.top!==window.self){' +
