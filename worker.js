@@ -87,6 +87,42 @@ function injectInHead(html, content) {
   return content + html;
 }
 
+// Server-side HTML rewriter using Cloudflare's HTMLRewriter API.
+// Rewrites iframe/src, script/src, img/src, link/href in the initial HTML
+// to go through /proxy/ before the browser starts loading them. This catches
+// assets present at initial load — the MutationObserver only catches ones
+// injected later by JS.
+class SrcAttrRewriter {
+  constructor(baseURL, attr) {
+    this.baseURL = baseURL;
+    this.attr = attr;
+  }
+  element(el) {
+    var src = el.getAttribute(this.attr);
+    if (!src) return;
+    if (src.indexOf('data:') === 0 || src.indexOf('blob:') === 0) return;
+    if (src.indexOf('javascript:') === 0) return;
+    var abs;
+    try { abs = new URL(src, this.baseURL).href; } catch(e) { return; }
+    // Skip if already a proxy URL
+    if (src.indexOf('/proxy/') === 0) return;
+    el.setAttribute(this.attr, '/proxy/' + encodeURIComponent(abs));
+  }
+}
+
+async function rewriteIframesAndAssets(resp, baseURL) {
+  var rewriter = new HTMLRewriter()
+    .on('iframe[src]', new SrcAttrRewriter(baseURL, 'src'))
+    .on('script[src]', new SrcAttrRewriter(baseURL, 'src'))
+    .on('img[src]', new SrcAttrRewriter(baseURL, 'src'))
+    .on('link[href]', new SrcAttrRewriter(baseURL, 'href'))
+    .on('source[src]', new SrcAttrRewriter(baseURL, 'src'))
+    .on('video[src]', new SrcAttrRewriter(baseURL, 'src'))
+    .on('audio[src]', new SrcAttrRewriter(baseURL, 'src'));
+  var transformed = rewriter.transform(resp);
+  return await transformed.text();
+}
+
 function blockAdsInHTML(html) {
   html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
@@ -130,10 +166,16 @@ var NAV_BLOCKER = '<script>(function(){' +
     'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
     'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
   '}catch(e){}' +
-  // patch window.open
+  // patch window.open — gate popups by user gesture (blocks ad popups from timers)
   'try{' +
     'var _open=window.open;' +
-    'window.open=function(u,n,s){return _open.call(window,u?toProxy(u):u,n,s);};' +
+    'var lastGesture=0;' +
+    'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
+    'window.open=function(u,n,s){' +
+      'var sinceGesture=Date.now()-lastGesture;' +
+      'if(sinceGesture>1000){return null;}' +
+      'return _open.call(window,u?toProxy(u):u,n,s);' +
+    '};' +
   '}catch(e){}' +
   // patch history.pushState / replaceState so SPA nav stays proxied
   'try{' +
@@ -176,11 +218,18 @@ var NAV_BLOCKER = '<script>(function(){' +
       'return _beacon.call(navigator,url,data);' +
     '};' +
   '}catch(e){}' +
-  // 8. Rewrite dynamically-injected script/img/iframe src before they load
+  // 8. Rewrite dynamically-injected script/img/iframe src + block invisible _blank anchors
   'try{' +
     'function rewriteEl(el){' +
       'if(!el||!el.getAttribute)return;' +
       'var tag=el.tagName;' +
+      // Block invisible target=_blank anchors (fake-click popup evasion)
+      'if(tag==="A"&&el.getAttribute("target")==="_blank"){' +
+        'var st=el.style;' +
+        'if(st&&(st.display==="none"||st.visibility==="hidden")){' +
+          'el.removeAttribute("target");' +
+        '}' +
+      '}' +
       'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"||tag==="LINK"||tag==="SOURCE"||tag==="VIDEO"||tag==="AUDIO"){' +
         'var src=el.getAttribute("src")||el.getAttribute("href");' +
         'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
@@ -193,11 +242,11 @@ var NAV_BLOCKER = '<script>(function(){' +
       'muts.forEach(function(m){' +
         'm.addedNodes&&m.addedNodes.forEach(function(n){' +
           'rewriteEl(n);' +
-          'if(n.querySelectorAll){n.querySelectorAll("script,img,iframe,link,source,video,audio").forEach(rewriteEl);}' +
+          'if(n.querySelectorAll){n.querySelectorAll("a,script,img,iframe,link,source,video,audio").forEach(rewriteEl);}' +
         '});' +
         'if(m.type==="attributes")rewriteEl(m.target);' +
       '});' +
-    '}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
+    '}).observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href","target"]});' +
   '}catch(e){}' +
   // 9. Navigation API — catches location.href=, assign(), replace(), everything
   // Supported in Chrome/Edge. Falls back to the polling for Firefox/Safari.
@@ -213,15 +262,17 @@ var NAV_BLOCKER = '<script>(function(){' +
       '});' +
     '}' +
   '}catch(e){}' +
-  // catch plain <a> clicks with absolute hrefs to the real origin
+  // catch <a> clicks — handle target=_blank via controlled window.open
   'document.addEventListener("click",function(e){' +
     'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
     'if(!a)return;' +
     'var h=a.getAttribute("href")||"";' +
-    'if(/^https?:\\/\\//i.test(h)&&h.indexOf(ORIGIN)!==0){' +
-      'e.preventDefault();' +
-      'window.location.href=toProxy(h);' +
-    '}' +
+    'if(!/^https?:\\/\\//i.test(h))return;' +
+    'e.preventDefault();' +
+    'var dest=toProxy(h);' +
+    'var tgt=a.getAttribute("target");' +
+    'if(tgt&&tgt!=="_self"){window.open(dest,"_blank","noopener,noreferrer");}' +
+    'else{window.location.href=dest;}' +
   '},true);' +
 '})();</script>';
 
@@ -459,13 +510,19 @@ async function handleRequest(request) {
     });
   }
 
-  // HTML: fetch, clean, inject <base>, strip headers, block ads, block nav,
-  // rewrite inline JS scripts
+  // HTML: use HTMLRewriter to rewrite iframe/script/img/link src server-side
+  // (catches assets in initial HTML before JS runs), then inject <base>,
+  // strip headers, block ads, block nav, rewrite inline JS scripts.
   var pageHtml;
   try {
-    pageHtml = await resp.text();
+    pageHtml = await rewriteIframesAndAssets(resp, resp.url);
   } catch(err) {
-    return new Response('Failed to read response: ' + (err.message || err), { status: 502 });
+    // Fallback to plain text() if HTMLRewriter fails
+    try {
+      pageHtml = await resp.text();
+    } catch(err2) {
+      return new Response('Failed to read response: ' + (err2.message || err2), { status: 502 });
+    }
   }
 
   pageHtml = blockAdsInHTML(pageHtml);
