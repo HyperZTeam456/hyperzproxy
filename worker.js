@@ -93,8 +93,9 @@ function injectInHead(html, content) {
 // assets present at initial load — the MutationObserver only catches ones
 // injected later by JS.
 class SrcAttrRewriter {
-  constructor(baseURL, attr) {
+  constructor(baseURL, workerOrigin, attr) {
     this.baseURL = baseURL;
+    this.workerOrigin = workerOrigin;
     this.attr = attr;
   }
   element(el) {
@@ -106,19 +107,21 @@ class SrcAttrRewriter {
     try { abs = new URL(src, this.baseURL).href; } catch(e) { return; }
     // Skip if already a proxy URL
     if (src.indexOf('/proxy/') === 0) return;
-    el.setAttribute(this.attr, '/proxy/' + encodeURIComponent(abs));
+    // Use ABSOLUTE URL to the Worker so it doesn't get resolved against
+    // the <base href> tag (which points to the real site).
+    el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + encodeURIComponent(abs));
   }
 }
 
-async function rewriteIframesAndAssets(resp, baseURL) {
+async function rewriteIframesAndAssets(resp, baseURL, workerOrigin) {
   var rewriter = new HTMLRewriter()
-    .on('iframe[src]', new SrcAttrRewriter(baseURL, 'src'))
-    .on('script[src]', new SrcAttrRewriter(baseURL, 'src'))
-    .on('img[src]', new SrcAttrRewriter(baseURL, 'src'))
-    .on('link[href]', new SrcAttrRewriter(baseURL, 'href'))
-    .on('source[src]', new SrcAttrRewriter(baseURL, 'src'))
-    .on('video[src]', new SrcAttrRewriter(baseURL, 'src'))
-    .on('audio[src]', new SrcAttrRewriter(baseURL, 'src'));
+    .on('iframe[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
+    .on('script[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
+    .on('img[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
+    .on('link[href]', new SrcAttrRewriter(baseURL, workerOrigin, 'href'))
+    .on('source[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
+    .on('video[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
+    .on('audio[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'));
   var transformed = rewriter.transform(resp);
   return await transformed.text();
 }
@@ -515,7 +518,7 @@ async function handleRequest(request) {
   // strip headers, block ads, block nav, rewrite inline JS scripts.
   var pageHtml;
   try {
-    pageHtml = await rewriteIframesAndAssets(resp, resp.url);
+    pageHtml = await rewriteIframesAndAssets(resp, resp.url, url.origin);
   } catch(err) {
     // Fallback to plain text() if HTMLRewriter fails
     try {
