@@ -265,6 +265,30 @@ var NAV_BLOCKER = '<script>(function(){' +
       '});' +
     '}' +
   '}catch(e){}' +
+  // 10. Patch src/href property setters directly — closes the race
+  // between dynamic script/link creation and the MutationObserver.
+  // The observer is async/batched; property setters fire synchronously
+  // the instant JS sets .src, before any network activity starts.
+  'try{' +
+    'function patchSrcProp(proto,attr){' +
+      'var desc=Object.getOwnPropertyDescriptor(proto,attr);' +
+      'if(!desc||!desc.set)return;' +
+      'Object.defineProperty(proto,attr,{' +
+        'get:desc.get,' +
+        'set:function(v){' +
+          'if(v&&/^https?:\\/\\//i.test(v)&&v.indexOf(ORIGIN)!==0){' +
+            'v=toProxy(v);' +
+          '}' +
+          'return desc.set.call(this,v);' +
+        '},' +
+        'configurable:true' +
+      '});' +
+    '}' +
+    'patchSrcProp(HTMLScriptElement.prototype,"src");' +
+    'patchSrcProp(HTMLImageElement.prototype,"src");' +
+    'patchSrcProp(HTMLIFrameElement.prototype,"src");' +
+    'patchSrcProp(HTMLLinkElement.prototype,"href");' +
+  '}catch(e){}' +
   // catch <a> clicks — handle target=_blank via controlled window.open
   'document.addEventListener("click",function(e){' +
     'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
