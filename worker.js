@@ -103,13 +103,18 @@ class SrcAttrRewriter {
     if (!src) return;
     if (src.indexOf('data:') === 0 || src.indexOf('blob:') === 0) return;
     if (src.indexOf('javascript:') === 0) return;
-    var abs;
-    try { abs = new URL(src, this.baseURL).href; } catch(e) { return; }
     // Skip if already a proxy URL
     if (src.indexOf('/proxy/') === 0) return;
+    var abs;
+    try { abs = new URL(src, this.baseURL); } catch(e) { return; }
+    if (abs.protocol === 'data:' || abs.protocol === 'blob:') return;
     // Use ABSOLUTE URL to the Worker so it doesn't get resolved against
     // the <base href> tag (which points to the real site).
-    el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + encodeURIComponent(abs));
+    // Preserve real host/path structure (host/path?query) instead of
+    // encoding the whole URL into one opaque percent-encoded segment, so
+    // downstream code that does path math (webpack publicPath:'auto',
+    // relative imports, new URL('./x', import.meta.url)) keeps working.
+    el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + abs.host + abs.pathname + abs.search);
   }
 }
 
@@ -151,9 +156,12 @@ var NAV_BLOCKER = '<script>(function(){' +
   'var ORIGIN=self.location.origin;' +
   'function toProxy(u){' +
     'try{' +
-      'var abs=new URL(u,document.baseURI).href;' +
-      'if(abs.indexOf(ORIGIN)===0)return abs;' +
-      'return ORIGIN+"/proxy/"+encodeURIComponent(abs);' +
+      'var abs=new URL(u,document.baseURI);' +
+      // Same-origin guard: never re-wrap a URL that already points at the
+      // Worker itself (prevents /proxy/worker-host/proxy/... double-wrap).
+      'if(abs.origin===ORIGIN)return abs.href;' +
+      // Preserve real host/path structure so downstream path math works.
+      'return ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
   // 11. Kill Service Workers — they run in an isolated scope our patches
@@ -396,11 +404,19 @@ function parseUniversalURL(pathname, search) {
   var targetPath = pathname.charAt(0) === '/' ? pathname.slice(1) : pathname;
   if (!targetPath) return null;
   if (targetPath.indexOf('proxy/') === 0) {
-    try {
-      var d = decodeURIComponent(targetPath.substring(6));
-      if (search) d += search;
-      return d;
-    } catch(e) { return null; }
+    // Reconstruct from host+path (new style: /proxy/host/path?query) OR
+    // from a fully-encoded blob (old style: /proxy/https%3A%2F%2F...).
+    // Backward-compatible: old-style URLs still contain '://' after
+    // decoding and pass through unchanged; new-style 'host/path' URLs get
+    // 'https://' prepended.
+    var rest = targetPath.substring(6);
+    var d;
+    try { d = decodeURIComponent(rest); } catch(e) { d = rest; }
+    if (d.indexOf('://') === -1) {
+      d = 'https://' + d;
+    }
+    if (search) d += search;
+    return d;
   }
   var targetURL = targetPath;
   try {
