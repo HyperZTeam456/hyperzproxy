@@ -276,9 +276,11 @@ var NAV_BLOCKER = '<script>(function(){' +
       'Object.defineProperty(proto,attr,{' +
         'get:desc.get,' +
         'set:function(v){' +
-          'if(v&&/^https?:\\/\\//i.test(v)&&v.indexOf(ORIGIN)!==0){' +
-            'v=toProxy(v);' +
-          '}' +
+          'try{' +
+            'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)&&v.indexOf(ORIGIN)!==0){' +
+              'v=toProxy(v);' +
+            '}' +
+          '}catch(e){}' +
           'return desc.set.call(this,v);' +
         '},' +
         'configurable:true' +
