@@ -1,8 +1,9 @@
 /**
  * HyperZProxy — Universal reverse proxy with CloudMoon iframe + ad blocking
+ * OPTIMIZED FOR GAMES - v3.0
  */
 
-// Proxy target — split into fragments and assembled at runtime.
+// Proxy target
 var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
 var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
 
@@ -18,6 +19,13 @@ var AD_PATTERNS = [
   'adsafeprotected.com', 'moatads.com', 'scorecardresearch.com',
   '/ads/', '/ad/', '/advert/', '/advertisement/', '/adsense/',
   '/adserver/', '/analytics/', 'prebid', 'advertis', 'banner', 'popup'
+];
+
+// Game sites that need ultra-lightweight mode
+var GAME_DOMAINS = [
+  'crazygames.com', 'poki.com', 'miniclip.com', 'kongregate.com',
+  'newgrounds.com', 'armorgames.com', 'y8.com', 'friv.com',
+  'clickgames.com', 'gamepix.com', 'gamegarden.com'
 ];
 
 function isAdRequest(u) {
@@ -132,14 +140,11 @@ function blockAdsInHTML(html) {
   return html;
 }
 
-var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r)})();</script>';
+var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style>';
 
-// ULTRA OPTIMIZED Navigation blocker with game detection
-var NAV_BLOCKER = '<script>(function(){' +
+// ULTRA LIGHTWEIGHT for games - minimal overhead
+var NAV_BLOCKER_LIGHT = '<script>(function(){' +
   'var ORIGIN=self.location.origin;' +
-  'var GAME_MODE=false;' +
-  'var gameModeTimer=null;' +
-  
   'function toProxy(u){' +
     'try{' +
       'var abs=new URL(u,document.baseURI);' +
@@ -148,19 +153,7 @@ var NAV_BLOCKER = '<script>(function(){' +
     '}catch(e){return u;}' +
   '}' +
   
-  // Kill Service Workers
-  'try{' +
-    'if(navigator.serviceWorker){' +
-      'navigator.serviceWorker.register=function(){' +
-        'return Promise.reject(new Error("ServiceWorker registration blocked"));' +
-      '};' +
-      'navigator.serviceWorker.getRegistrations&&navigator.serviceWorker.getRegistrations().then(function(regs){' +
-        'regs.forEach(function(r){r.unregister();});' +
-      '});' +
-    '}' +
-  '}catch(e){}' +
-  
-  // Block frame-busting
+  // Only essential patches - no DOM manipulation
   'try{' +
     'if(window.top!==window.self){' +
       'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
@@ -168,184 +161,19 @@ var NAV_BLOCKER = '<script>(function(){' +
     '}' +
   '}catch(e){}' +
   
-  // Patch Location methods
   'try{' +
     'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
     'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
     'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
   '}catch(e){}' +
   
-  // Patch window.open
-  'try{' +
-    'var _open=window.open;' +
-    'var lastGesture=0;' +
-    'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
-    'window.open=function(u,n,s){' +
-      'var sinceGesture=Date.now()-lastGesture;' +
-      'if(sinceGesture>1000){return null;}' +
-      'return _open.call(window,u?toProxy(u):u,n,s);' +
-    '};' +
-  '}catch(e){}' +
-  
-  // Patch history methods
   'try{' +
     'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
     'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
     'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
   '}catch(e){}' +
   
-  // Patch fetch - lightweight
-  'try{' +
-    'var _fetch=window.fetch;' +
-    'window.fetch=function(input,init){' +
-      'var url=(typeof input==="string")?input:(input&&input.url);' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
-        'var proxied=toProxy(url);' +
-        'if(typeof input==="string"){input=proxied;}' +
-        'else{input=new Request(proxied,input);}' +
-      '}' +
-      'return _fetch.call(window,input,init);' +
-    '};' +
-  '}catch(e){}' +
-  
-  // Patch XHR - lightweight
-  'try{' +
-    'var _xhrOpen=XMLHttpRequest.prototype.open;' +
-    'XMLHttpRequest.prototype.open=function(method,url){' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
-        'url=toProxy(url);' +
-      '}' +
-      'var args=[method,url];' +
-      'for(var i=2;i<arguments.length;i++)args.push(arguments[i]);' +
-      'return _xhrOpen.apply(this,args);' +
-    '};' +
-  '}catch(e){}' +
-  
-  // Patch sendBeacon
-  'try{' +
-    'var _beacon=navigator.sendBeacon;' +
-    'navigator.sendBeacon=function(url,data){' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
-        'url=toProxy(url);' +
-      '}' +
-      'return _beacon.call(navigator,url,data);' +
-    '};' +
-  '}catch(e){}' +
-  
-  // GAME DETECTION: Check for canvas/WebGL and disable heavy operations
-  'function checkForGame(){' +
-    'var canvases=document.querySelectorAll("canvas");' +
-    'if(canvases.length>0){' +
-      'for(var i=0;i<canvases.length;i++){' +
-        'var c=canvases[i];' +
-        'if(c.width>100&&c.height>100){' +
-          'GAME_MODE=true;' +
-          'return true;' +
-        '}' +
-      '}' +
-    '}' +
-    'return false;' +
-  '}' +
-  
-  // Ultra lightweight MutationObserver - ONLY runs when NOT in game mode
-  'var observer=null;' +
-  'var pendingMutations=[];' +
-  'var processTimer=null;' +
-  
-  'function processMutations(){' +
-    'if(GAME_MODE){pendingMutations=[];return;}' +
-    'var batch=pendingMutations.splice(0,100);' +
-    'batch.forEach(function(m){' +
-      'if(m.addedNodes){' +
-        'm.addedNodes.forEach(function(n){' +
-          'if(n.nodeType===1&&n.tagName){' +
-            'var tag=n.tagName;' +
-            'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"||tag==="LINK"){' +
-              'var src=n.getAttribute("src")||n.getAttribute("href");' +
-              'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
-                'if(tag==="LINK")n.setAttribute("href",toProxy(src));' +
-                'else n.setAttribute("src",toProxy(src));' +
-              '}' +
-            '}' +
-            'if(n.querySelectorAll){' +
-              'var children=n.querySelectorAll("script,img,iframe,link");' +
-              'children.forEach(function(c){' +
-                'var tag=c.tagName;' +
-                'var src=c.getAttribute("src")||c.getAttribute("href");' +
-                'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(ORIGIN)!==0){' +
-                  'if(tag==="LINK")c.setAttribute("href",toProxy(src));' +
-                  'else c.setAttribute("src",toProxy(src));' +
-                '}' +
-              '});' +
-            '}' +
-          '}' +
-        '});' +
-      '}' +
-    '});' +
-    'if(pendingMutations.length>0){' +
-      'processTimer=requestIdleCallback(processMutations,{timeout:100});' +
-    '}else{' +
-      'processTimer=null;' +
-    '}' +
-  '}' +
-  
-  'function startObserver(){' +
-    'if(observer||GAME_MODE)return;' +
-    'observer=new MutationObserver(function(muts){' +
-      'if(GAME_MODE)return;' +
-      'muts.forEach(function(m){pendingMutations.push(m);});' +
-      'if(!processTimer){' +
-        'processTimer=requestIdleCallback(processMutations,{timeout:100});' +
-      '}' +
-    '});' +
-    'observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
-  '}' +
-  
-  'function stopObserver(){' +
-    'if(observer){' +
-      'observer.disconnect();' +
-      'observer=null;' +
-    '}' +
-    'if(processTimer){' +
-      'cancelIdleCallback(processTimer);' +
-      'processTimer=null;' +
-    '}' +
-    'pendingMutations=[];' +
-  '}' +
-  
-  // Check for game every 2 seconds and adjust mode
-  'function gameCheckLoop(){' +
-    'var wasGameMode=GAME_MODE;' +
-    'GAME_MODE=checkForGame();' +
-    'if(GAME_MODE&&!wasGameMode){' +
-      'stopObserver();' +
-    '}else if(!GAME_MODE&&wasGameMode){' +
-      'startObserver();' +
-    '}' +
-    'gameModeTimer=setTimeout(gameCheckLoop,2000);' +
-  '}' +
-  
-  // Start observer initially
-  'startObserver();' +
-  'gameCheckLoop();' +
-  
-  // Navigation API
-  'try{' +
-    'if(window.navigation){' +
-      'navigation.addEventListener("navigate",function(e){' +
-        'var dest=e.destination&&e.destination.url;' +
-        'if(!dest)return;' +
-        'if(dest.indexOf(ORIGIN)!==0){' +
-          'e.preventDefault();' +
-          'window.location.href=toProxy(dest);' +
-        '}' +
-      '});' +
-    '}' +
-  '}catch(e){}' +
-  
-  // REMOVED patchSrcProp - too heavy for games, server-side rewrite handles it
-  
-  // Click handler
+  // Click handler - use passive where possible
   'document.addEventListener("click",function(e){' +
     'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
     'if(!a)return;' +
@@ -359,7 +187,93 @@ var NAV_BLOCKER = '<script>(function(){' +
   '},true);' +
 '})();</script>';
 
-// JS source rewriter
+// Full version for non-game sites
+var NAV_BLOCKER_FULL = '<script>(function(){' +
+  'var ORIGIN=self.location.origin;' +
+  'function toProxy(u){' +
+    'try{' +
+      'var abs=new URL(u,document.baseURI);' +
+      'if(abs.origin===ORIGIN)return abs.href;' +
+      'return ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
+    '}catch(e){return u;}' +
+  '}' +
+  
+  'try{' +
+    'if(navigator.serviceWorker){' +
+      'navigator.serviceWorker.register=function(){' +
+        'return Promise.reject(new Error("blocked"));' +
+      '};' +
+    '}' +
+  '}catch(e){}' +
+  
+  'try{' +
+    'if(window.top!==window.self){' +
+      'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
+      'Object.defineProperty(window,"parent",{get:function(){return window.self;}});' +
+    '}' +
+  '}catch(e){}' +
+  
+  'try{' +
+    'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
+    'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
+    'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
+  '}catch(e){}' +
+  
+  'try{' +
+    'var _open=window.open;' +
+    'var lastGesture=0;' +
+    'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
+    'window.open=function(u,n,s){' +
+      'var sinceGesture=Date.now()-lastGesture;' +
+      'if(sinceGesture>1000){return null;}' +
+      'return _open.call(window,u?toProxy(u):u,n,s);' +
+    '};' +
+  '}catch(e){}' +
+  
+  'try{' +
+    'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
+    'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
+    'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
+  '}catch(e){}' +
+  
+  'try{' +
+    'var _fetch=window.fetch;' +
+    'window.fetch=function(input,init){' +
+      'var url=(typeof input==="string")?input:(input&&input.url);' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
+        'var proxied=toProxy(url);' +
+        'if(typeof input==="string"){input=proxied;}' +
+        'else{input=new Request(proxied,input);}' +
+      '}' +
+      'return _fetch.call(window,input,init);' +
+    '};' +
+  '}catch(e){}' +
+  
+  'try{' +
+    'var _xhrOpen=XMLHttpRequest.prototype.open;' +
+    'XMLHttpRequest.prototype.open=function(method,url){' +
+      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(ORIGIN)!==0){' +
+        'url=toProxy(url);' +
+      '}' +
+      'var args=[method,url];' +
+      'for(var i=2;i<arguments.length;i++)args.push(arguments[i]);' +
+      'return _xhrOpen.apply(this,args);' +
+    '};' +
+  '}catch(e){}' +
+  
+  'document.addEventListener("click",function(e){' +
+    'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
+    'if(!a)return;' +
+    'var h=a.getAttribute("href")||"";' +
+    'if(!/^https?:\\/\\//i.test(h))return;' +
+    'e.preventDefault();' +
+    'var dest=toProxy(h);' +
+    'var tgt=a.getAttribute("target");' +
+    'if(tgt&&tgt!=="_self"){window.open(dest,"_blank","noopener,noreferrer");}' +
+    'else{window.location.href=dest;}' +
+  '},true);' +
+'})();</script>';
+
 function rewriteJsSource(js) {
   var assignPattern = /((?:window\.|document\.)?location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\2/gi;
   js = js.replace(assignPattern, function(match, target, quote, url) {
@@ -442,6 +356,14 @@ function parseUniversalURL(pathname, search) {
     return targetURL;
   }
   return search ? 'https://' + targetURL + search : 'https://' + targetURL;
+}
+
+function isGameSite(url) {
+  var hostname = (url.hostname || '').toLowerCase();
+  for (var i = 0; i < GAME_DOMAINS.length; i++) {
+    if (hostname.indexOf(GAME_DOMAINS[i]) !== -1) return true;
+  }
+  return false;
 }
 
 async function handleRequest(request) {
@@ -540,6 +462,8 @@ async function handleRequest(request) {
   }
 
   var contentType = (resp.headers.get('Content-Type') || '').toLowerCase();
+  var targetUrlObj = new URL(targetURL);
+  var isGame = isGameSite(targetUrlObj);
 
   if (contentType.indexOf('text/html') === -1) {
     var passH = new Headers(resp.headers);
@@ -580,7 +504,14 @@ async function handleRequest(request) {
   pageHtml = blockAdsInHTML(pageHtml);
   pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
-  pageHtml = injectInHead(pageHtml, NAV_BLOCKER);
+  
+  // Use lightweight blocker for game sites
+  if (isGame) {
+    pageHtml = injectInHead(pageHtml, NAV_BLOCKER_LIGHT);
+  } else {
+    pageHtml = injectInHead(pageHtml, NAV_BLOCKER_FULL);
+  }
+  
   pageHtml = rewriteInlineScripts(pageHtml);
 
   var htmlH = new Headers(resp.headers);
