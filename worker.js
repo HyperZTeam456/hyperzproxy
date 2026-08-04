@@ -150,12 +150,21 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   '}' +
 
   // --- URL reporter: postMessage current URL to parent for URL bar tracking ---
-  // Runs in EVERY frame. Only the direct child's message reaches HyperZWeb
-  // (nested frames postMessage to their game-iframe parent, not HyperZWeb).
+  // Runs in EVERY frame. Only sends to a same-origin parent (verified via
+  // window.parent.location.origin) — if the parent is cross-origin (e.g. a
+  // third-party site embedding HyperZProxy), we DON'T send, so browsing URLs
+  // are never leaked to embedders we can't identify.
   'function reportUrl(){' +
     'try{' +
       'if(window.parent&&window.parent!==window.self){' +
-        'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},"*");' +
+        'var parentOrigin;' +
+        'try{' +
+          'parentOrigin=window.parent.location.origin;' +
+        '}catch(e){' +
+          'return;' + // parent is cross-origin, can't verify it's HyperZProxy — don't send
+        '}' +
+        'if(parentOrigin!==SELF_ORIGIN)return;' + // not our own frame — don't leak the URL
+        'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},parentOrigin);' +
       '}' +
     '}catch(e){}' +
   '}' +
