@@ -142,16 +142,31 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   '}catch(e){' +
     'RUN_HEAVY=true;' + // parent is cross-origin — we don't know who embedded us, stay safe and full-featured
   '}' +
+  'var REAL_BASE="__REAL_BASE__";' +
   'var REAL_ORIGIN="__REAL_ORIGIN__";' +
   'function toProxy(u){' +
     'try{' +
       'if(!u)return u;' +
       'if(/^(about|blob|data|javascript|mailto|tel):/i.test(u))return u;' +
-      'var abs=new URL(u,REAL_ORIGIN||document.baseURI);' +
+      'var abs=new URL(u,REAL_BASE||document.baseURI);' +
       'if(abs.protocol!=="http:"&&abs.protocol!=="https:")return u;' +
       'return SELF_ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
+
+  // Defense-in-depth: some frameworks (YouTube's Polymer/Kevlar stack)
+  // cache a direct reference to the native History methods and bypass
+  // our prototype patch entirely. When that happens, replaceState/pushState
+  // with a real-domain URL throws a SecurityError that crashes custom
+  // element lifecycle callbacks. Swallow just that specific error so
+  // the page keeps rendering instead of hanging.
+  'window.addEventListener("error",function(e){' +
+    'if(e.error&&e.error.name==="SecurityError"&&/replaceState|pushState/.test(e.message||"")){' +
+      'e.preventDefault();' +
+      'e.stopImmediatePropagation();' +
+      'return true;' +
+    '}' +
+  '},true);' +
 
   // --- URL reporter: postMessage current URL to parent for URL bar tracking ---
   // Runs in EVERY frame. Two paths:
@@ -667,12 +682,15 @@ async function handleRequest(request) {
   // Use resp.url (final URL after redirects) for <base> so assets resolve correctly
   pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
-  // Fill in __REAL_ORIGIN__ with the real target origin so toProxy resolves
-  // relative URLs against it (not document.baseURI, which points at the real
-  // domain via <base> and would produce doubled real-domain/proxy/ URLs).
-  var realOrigin;
-  try { realOrigin = new URL(resp.url).origin; } catch(e) { realOrigin = ''; }
-  pageHtml = injectInHead(pageHtml, SANDBOX_SCRIPT.replace('__REAL_ORIGIN__', realOrigin));
+  // Fill in __REAL_BASE__ (full URL for relative resolution) and
+  // __REAL_ORIGIN__ (origin for same-origin checks) so toProxy resolves
+  // relative URLs against the real page's full URL, not just the bare origin
+  // (bare origin causes doubled paths like youtube.com/youtube.com?x=1).
+  var realBase, realOrigin;
+  try { var _u = new URL(resp.url); realBase = _u.href; realOrigin = _u.origin; } catch(e) { realBase = ''; realOrigin = ''; }
+  pageHtml = injectInHead(pageHtml, SANDBOX_SCRIPT
+    .replace('__REAL_BASE__', realBase)
+    .replace('__REAL_ORIGIN__', realOrigin));
   // Rewrite navigation calls in inline <script> blocks
   pageHtml = rewriteInlineScripts(pageHtml);
 
