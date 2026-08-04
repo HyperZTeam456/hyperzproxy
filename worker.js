@@ -149,6 +149,19 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
     '}catch(e){return u;}' +
   '}' +
 
+  // --- URL reporter: postMessage current URL to parent for URL bar tracking ---
+  // Runs in EVERY frame. Only the direct child's message reaches HyperZWeb
+  // (nested frames postMessage to their game-iframe parent, not HyperZWeb).
+  'function reportUrl(){' +
+    'try{' +
+      'if(window.parent&&window.parent!==window.self){' +
+        'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},"*");' +
+      '}' +
+    '}catch(e){}' +
+  '}' +
+  'reportUrl();' +
+  'setInterval(reportUrl,500);' +
+
   // --- lightweight patches: run in EVERY frame, top and nested ---
   'try{' +
     'var _fetch=window.fetch;' +
@@ -247,6 +260,7 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
         'var cur=self.location.href;' +
         'if(cur.indexOf(SELF_ORIGIN)!==0){self.location.href=toProxy(cur);}' +
         'lastHref=self.location.href;' +
+        'reportUrl();' +
       '}' +
     '},150);' +
     'try{' +
