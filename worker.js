@@ -150,10 +150,19 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   '}' +
 
   // --- URL reporter: postMessage current URL to parent for URL bar tracking ---
-  // Runs in EVERY frame. Only sends to a same-origin parent (verified via
-  // window.parent.location.origin) — if the parent is cross-origin (e.g. a
-  // third-party site embedding HyperZProxy), we DON'T send, so browsing URLs
-  // are never leaked to embedders we can't identify.
+  // Runs in EVERY frame. Two paths:
+  //  (1) Same-origin parent (HyperZProxy nested in HyperZProxy): send directly,
+  //      no handshake needed — we can verify the parent via location.origin.
+  //  (2) Cross-origin parent (third-party embed): only send if the parent has
+  //      explicitly subscribed via an hzp-subscribe message. This opt-in model
+  //      prevents leaking browsing URLs to embedders that haven't asked.
+  'var subscribedOrigins=new Set();' +
+  'window.addEventListener("message",function(e){' +
+    'if(e.data&&e.data.type==="hzp-subscribe"){' +
+      'subscribedOrigins.add(e.origin);' +
+      'try{e.source.postMessage({type:"hzp-subscribed"},e.origin);}catch(_){}' +
+    '}' +
+  '});' +
   'function reportUrl(){' +
     'try{' +
       'if(window.parent&&window.parent!==window.self){' +
@@ -161,10 +170,15 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
         'try{' +
           'parentOrigin=window.parent.location.origin;' +
         '}catch(e){' +
-          'return;' + // parent is cross-origin, can't verify it's HyperZProxy — don't send
+          'parentOrigin=null;' +
         '}' +
-        'if(parentOrigin!==SELF_ORIGIN)return;' + // not our own frame — don't leak the URL
-        'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},parentOrigin);' +
+        'if(parentOrigin===SELF_ORIGIN){' +
+          'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},parentOrigin);' +
+        '}else if(subscribedOrigins.size){' +
+          'subscribedOrigins.forEach(function(origin){' +
+            'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},origin);' +
+          '});' +
+        '}' +
       '}' +
     '}catch(e){}' +
   '}' +
