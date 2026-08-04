@@ -67,73 +67,6 @@ function b54encode(str) {
 
 function encodeUrl(url) { return b54encode(caesarEncode(url)); }
 
-// === Full URL encoding: caesar(+1) → vigenère → base54 ===
-// High-entropy key for vigenère — long enough to avoid short-cycle attacks.
-var VIG_KEY = 'HzP2024SecR3tK3y!@#$%^&*ZXCVBNMLqwerty';
-function vigenereEncrypt(str) {
-  var out = '';
-  for (var i = 0; i < str.length; i++) {
-    out += String.fromCharCode((str.charCodeAt(i) + VIG_KEY.charCodeAt(i % VIG_KEY.length)) % 256);
-  }
-  return out;
-}
-function vigenereDecrypt(str) {
-  var out = '';
-  for (var i = 0; i < str.length; i++) {
-    out += String.fromCharCode((str.charCodeAt(i) - VIG_KEY.charCodeAt(i % VIG_KEY.length) + 256) % 256);
-  }
-  return out;
-}
-function caesarDecode(str) {
-  var out = '';
-  for (var i = 0; i < str.length; i++) out += String.fromCharCode(str.charCodeAt(i) - 1);
-  return out;
-}
-function b54decode(str) {
-  var bytes = [];
-  var i = 0;
-  while (i < str.length) {
-    var chunk = str.substring(i, i + 5); i += 5;
-    var val = 0;
-    for (var j = 0; j < chunk.length; j++) {
-      var idx = B54_ALPHABET.indexOf(chunk[j]);
-      if (idx === -1) return null; // invalid char
-      val = val * B54_BASE + idx;
-    }
-    bytes.push((val >> 16) & 255);
-    bytes.push((val >> 8) & 255);
-    bytes.push(val & 255);
-  }
-  while (bytes.length > 0 && bytes[bytes.length - 1] === 0) bytes.pop();
-  var result = '';
-  var j = 0;
-  while (j < bytes.length) {
-    var b1 = bytes[j++];
-    if (b1 < 128) result += String.fromCharCode(b1);
-    else if (b1 < 224) { var b2 = bytes[j++]; result += String.fromCharCode(((b1 & 31) << 6) | (b2 & 63)); }
-    else { var b2 = bytes[j++], b3 = bytes[j++]; result += String.fromCharCode(((b1 & 15) << 12) | ((b2 & 63) << 6) | (b3 & 63)); }
-  }
-  return result;
-}
-// Encode: caesar(+1) → vigenère → base54
-function encodeFullUrl(url) { return b54encode(vigenereEncrypt(caesarEncode(url))); }
-// Decode: base54 → vigenère decrypt → caesar(-1)
-function decodeFullUrl(encoded) {
-  try {
-    var decoded = b54decode(encoded);
-    if (!decoded) return null;
-    return caesarDecode(vigenereDecrypt(decoded));
-  } catch(e) { return null; }
-}
-// Check if a string looks like a b54-encoded blob (only b54 alphabet chars, length >= 5)
-function isB54Encoded(str) {
-  if (!str || str.length < 5) return false;
-  for (var i = 0; i < str.length; i++) {
-    if (B54_ALPHABET.indexOf(str[i]) === -1) return false;
-  }
-  return true;
-}
-
 function stripSecurityHeaders(h) {
   h.delete('Content-Security-Policy');
   h.delete('Content-Security-Policy-Report-Only');
@@ -171,7 +104,7 @@ class SrcAttrRewriter {
     var abs;
     try { abs = new URL(src, this.baseURL); } catch(e) { return; }
     if (abs.protocol === 'data:' || abs.protocol === 'blob:') return;
-    el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + encodeFullUrl(abs.href));
+    el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + abs.host + abs.pathname + abs.search);
   }
 }
 
@@ -211,21 +144,13 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   '}' +
   'var REAL_BASE="__REAL_BASE__";' +
   'var REAL_ORIGIN="__REAL_ORIGIN__";' +
-  // --- Client-side URL encoding (caesar+1 → vigenère → base54) ---
-  'var B54A="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567";' +
-  'var B54B=54;' +
-  'var VK="HzP2024SecR3tK3y!@#$%^&*ZXCVBNMLqwerty";' +
-  'function cE(s){var o="";for(var i=0;i<s.length;i++)o+=String.fromCharCode(s.charCodeAt(i)+1);return o;}' +
-  'function vE(s){var o="";for(var i=0;i<s.length;i++)o+=String.fromCharCode((s.charCodeAt(i)+VK.charCodeAt(i%VK.length))%256);return o;}' +
-  'function b54e(s){var b=[];for(var i=0;i<s.length;i++){var c=s.charCodeAt(i);if(c<128)b.push(c);else if(c<2048){b.push(192|(c>>6));b.push(128|(c&63));}else{b.push(224|(c>>12));b.push(128|((c>>6)&63));b.push(128|(c&63));}}var r="";var i=0;while(i<b.length){var a=b[i++]||0,d=b[i++]||0,e=b[i++]||0;var n=(a<<16)|(d<<8)|e;var ch=[],v=n;do{ch.push(B54A[v%B54B]);v=Math.floor(v/B54B);}while(v>0&&ch.length<5);while(ch.length<5)ch.push(B54A[0]);r+=ch.reverse().join("");}return r;}' +
-  'function encFU(u){return b54e(vE(cE(u)));}' +
   'function toProxy(u){' +
     'try{' +
       'if(!u)return u;' +
       'if(/^(about|blob|data|javascript|mailto|tel):/i.test(u))return u;' +
       'var abs=new URL(u,REAL_BASE||document.baseURI);' +
       'if(abs.protocol!=="http:"&&abs.protocol!=="https:")return u;' +
-      'return SELF_ORIGIN+"/proxy/"+encFU(abs.href);' +
+      'return SELF_ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
 
@@ -496,11 +421,11 @@ function rewriteJsSource(js) {
   js = js.replace(assignPattern, function(match, target, quote, url) {
     // Only rewrite if it's an absolute URL (has ://)
     if (/^https?:\/\//i.test(url)) {
-      return target + ' = ' + quote + '/proxy/' + encodeFullUrl(url) + quote;
+      return target + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
     }
     // Protocol-relative URLs (//example.com)
     if (url.indexOf('//') === 0) {
-      return target + ' = ' + quote + '/proxy/' + encodeFullUrl('https:' + url) + quote;
+      return target + ' = ' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
     }
     return match;
   });
@@ -509,10 +434,10 @@ function rewriteJsSource(js) {
   var methodPattern = /((?:window\.|document\.)?location)\.(assign|replace)\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3\s*\)/gi;
   js = js.replace(methodPattern, function(match, loc, method, quote, url) {
     if (/^https?:\/\//i.test(url)) {
-      return loc + '.' + method + '(' + quote + '/proxy/' + encodeFullUrl(url) + quote + ')';
+      return loc + '.' + method + '(' + quote + '/proxy/' + encodeURIComponent(url) + quote + ')';
     }
     if (url.indexOf('//') === 0) {
-      return loc + '.' + method + '(' + quote + '/proxy/' + encodeFullUrl('https:' + url) + quote + ')';
+      return loc + '.' + method + '(' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote + ')';
     }
     return match;
   });
@@ -521,10 +446,10 @@ function rewriteJsSource(js) {
   var openPattern = /window\.open\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\1/gi;
   js = js.replace(openPattern, function(match, quote, url) {
     if (/^https?:\/\//i.test(url)) {
-      return 'window.open(' + quote + '/proxy/' + encodeFullUrl(url) + quote;
+      return 'window.open(' + quote + '/proxy/' + encodeURIComponent(url) + quote;
     }
     if (url.indexOf('//') === 0) {
-      return 'window.open(' + quote + '/proxy/' + encodeFullUrl('https:' + url) + quote;
+      return 'window.open(' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
     }
     return match;
   });
@@ -533,7 +458,7 @@ function rewriteJsSource(js) {
   var topPattern = /(top|parent)\.(location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3/gi;
   js = js.replace(topPattern, function(match, scope, loc, quote, url) {
     if (/^https?:\/\//i.test(url)) {
-      return scope + '.' + loc + ' = ' + quote + '/proxy/' + encodeFullUrl(url) + quote;
+      return scope + '.' + loc + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
     }
     return match;
   });
@@ -559,20 +484,6 @@ function parseUniversalURL(pathname, search) {
   if (!targetPath) return null;
   if (targetPath.indexOf('proxy/') === 0) {
     var rest = targetPath.substring(6);
-    // PRIORITY 1: Try b54+vigenere+caesar decoding (new encoded format).
-    // The encoded blob is a continuous string of B54_ALPHABET characters.
-    // It may have a query string appended (after ?), so strip that first.
-    var encodedPart = rest;
-    var queryPart = '';
-    var qIdx = encodedPart.indexOf('?');
-    if (qIdx !== -1) { queryPart = encodedPart.substring(qIdx); encodedPart = encodedPart.substring(0, qIdx); }
-    if (isB54Encoded(encodedPart)) {
-      var decoded = decodeFullUrl(encodedPart);
-      if (decoded && decoded.indexOf('://') !== -1) {
-        return decoded + queryPart;
-      }
-    }
-    // PRIORITY 2: Old/new-style plain-text proxy URLs (backward compat).
     var d;
     try { d = decodeURIComponent(rest); } catch(e) { d = rest; }
     if (d.indexOf('://') === -1) {
