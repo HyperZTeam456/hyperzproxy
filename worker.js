@@ -142,9 +142,11 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   '}catch(e){' +
     'RUN_HEAVY=true;' + // parent is cross-origin — we don't know who embedded us, stay safe and full-featured
   '}' +
+  'var REAL_ORIGIN="__REAL_ORIGIN__";' +
   'function toProxy(u){' +
     'try{' +
-      'var abs=new URL(u,document.baseURI);' +
+      'if(!/^https?:\\/\\//i.test(u)&&u.indexOf("about:")===0)return u;' +
+      'var abs=new URL(u,REAL_ORIGIN||document.baseURI);' +
       'return SELF_ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
@@ -240,7 +242,7 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   'document.addEventListener("click",function(e){' +
     'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
     'if(!a)return;var h=a.getAttribute("href")||"";' +
-    'if(!/^https?:\\/\\//i.test(h))return;' +
+    'if(!h||h.charAt(0)==="#"||/^(javascript|mailto|tel):/i.test(h))return;' +
     'e.preventDefault();' +
     'var dest=toProxy(h);' +
     'var tgt=a.getAttribute("target");' +
@@ -646,7 +648,12 @@ async function handleRequest(request) {
   // Use resp.url (final URL after redirects) for <base> so assets resolve correctly
   pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
-  pageHtml = injectInHead(pageHtml, SANDBOX_SCRIPT);
+  // Fill in __REAL_ORIGIN__ with the real target origin so toProxy resolves
+  // relative URLs against it (not document.baseURI, which points at the real
+  // domain via <base> and would produce doubled real-domain/proxy/ URLs).
+  var realOrigin;
+  try { realOrigin = new URL(resp.url).origin; } catch(e) { realOrigin = ''; }
+  pageHtml = injectInHead(pageHtml, SANDBOX_SCRIPT.replace('__REAL_ORIGIN__', realOrigin));
   // Rewrite navigation calls in inline <script> blocks
   pageHtml = rewriteInlineScripts(pageHtml);
 
