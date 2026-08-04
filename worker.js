@@ -145,8 +145,10 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   'var REAL_ORIGIN="__REAL_ORIGIN__";' +
   'function toProxy(u){' +
     'try{' +
-      'if(!/^https?:\\/\\//i.test(u)&&u.indexOf("about:")===0)return u;' +
+      'if(!u)return u;' +
+      'if(/^(about|blob|data|javascript|mailto|tel):/i.test(u))return u;' +
       'var abs=new URL(u,REAL_ORIGIN||document.baseURI);' +
+      'if(abs.protocol!=="http:"&&abs.protocol!=="https:")return u;' +
       'return SELF_ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
