@@ -568,7 +568,8 @@ async function handleRequest(request) {
   fwdHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
   fwdHeaders.delete('Host');
   fwdHeaders.delete('Origin');
-  fwdHeaders.delete('Referer');
+  // Keep Referer if the browser sent one — some CDNs (e.g. googlevideo.com)
+  // reject or degrade requests without it.
   fwdHeaders.delete('cf-connecting-ip');
   fwdHeaders.delete('cf-ray');
   fwdHeaders.delete('cf-visitor');
@@ -624,6 +625,22 @@ async function handleRequest(request) {
     if (contentType.indexOf('image/') !== -1 || contentType.indexOf('font/') !== -1 || contentType.indexOf('css') !== -1) {
       passH.set('Cache-Control', 'public, max-age=86400');
     }
+    // Preserve range-request support for video/audio streaming
+    if (resp.headers.has('Content-Range')) passH.set('Content-Range', resp.headers.get('Content-Range'));
+    if (resp.headers.has('Accept-Ranges')) passH.set('Accept-Ranges', resp.headers.get('Accept-Ranges'));
+
+    // Cookie forwarding — rewrite Set-Cookie so it applies to the Worker's own origin
+    if (typeof resp.headers.getSetCookie === 'function') {
+      var cookies1 = resp.headers.getSetCookie();
+      if (cookies1.length) {
+        passH.delete('Set-Cookie');
+        cookies1.forEach(function(c) {
+          var rewritten = c.replace(/;\s*[Dd]omain=[^;]+/i, '').replace(/;\s*[Ss]ecure/gi, '');
+          passH.append('Set-Cookie', rewritten);
+        });
+      }
+    }
+
     return new Response(resp.body, {
       status: resp.status, statusText: resp.statusText, headers: passH
     });
@@ -663,6 +680,18 @@ async function handleRequest(request) {
   stripSecurityHeaders(htmlH);
   htmlH.set('Content-Security-Policy',
     "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-ancestors *");
+
+  // Cookie forwarding — rewrite Set-Cookie so it applies to the Worker's own origin
+  if (typeof resp.headers.getSetCookie === 'function') {
+    var cookies2 = resp.headers.getSetCookie();
+    if (cookies2.length) {
+      htmlH.delete('Set-Cookie');
+      cookies2.forEach(function(c) {
+        var rewritten = c.replace(/;\s*[Dd]omain=[^;]+/i, '').replace(/;\s*[Ss]ecure/gi, '');
+        htmlH.append('Set-Cookie', rewritten);
+      });
+    }
+  }
 
   return new Response(pageHtml, {
     status: resp.status, statusText: resp.statusText, headers: htmlH
