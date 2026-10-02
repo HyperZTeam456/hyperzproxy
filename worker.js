@@ -1,11 +1,5 @@
-/**
- * HyperZProxy — Universal reverse proxy with CloudMoon iframe + ad blocking
- */
-
-// Proxy target — split into fragments and assembled at runtime.
 var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
 var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
-
 var AD_PATTERNS = [
   'googlesyndication.com', 'doubleclick.net', 'googleadservices.com',
   'google-analytics.com', 'googletagmanager.com', 'googletagservices.com',
@@ -19,13 +13,11 @@ var AD_PATTERNS = [
   '/ads/', '/ad/', '/advert/', '/advertisement/', '/adsense/',
   '/adserver/', '/analytics/', 'prebid', 'advertis', 'banner', 'popup'
 ];
-
 function isAdRequest(u) {
   u = (u || '').toLowerCase();
   for (var i = 0; i < AD_PATTERNS.length; i++) { if (u.indexOf(AD_PATTERNS[i]) !== -1) return true; }
   return false;
 }
-
 function isCloudMoonPath(pathname) {
   var _d = ['app', 'com'], _n = 'cloudmoon', _w = 'web';
   var full = _w + '.' + _n + _d[0] + '.' + _d[1];
@@ -34,16 +26,13 @@ function isCloudMoonPath(pathname) {
   if (pathname === '/' + short || pathname.indexOf('/' + short + '/') === 0) return true;
   return false;
 }
-
 var B54_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567';
 var B54_BASE = 54;
-
 function caesarEncode(str) {
   var out = '';
   for (var i = 0; i < str.length; i++) out += String.fromCharCode(str.charCodeAt(i) + 1);
   return out;
 }
-
 function b54encode(str) {
   var bytes = [];
   for (var i = 0; i < str.length; i++) {
@@ -64,9 +53,7 @@ function b54encode(str) {
   }
   return result;
 }
-
 function encodeUrl(url) { return b54encode(caesarEncode(url)); }
-
 function stripSecurityHeaders(h) {
   h.delete('Content-Security-Policy');
   h.delete('Content-Security-Policy-Report-Only');
@@ -79,19 +66,12 @@ function stripSecurityHeaders(h) {
   h.delete('Cross-Origin-Resource-Policy');
   h.delete('Permissions-Policy');
 }
-
 function injectInHead(html, content) {
   var m = html.match(/<head[^>]*>/i);
   if (m) return html.replace(m[0], m[0] + content);
   if (html.indexOf('</head>') !== -1) return html.replace('</head>', content + '</head>');
   return content + html;
 }
-
-// Server-side HTML rewriter using Cloudflare's HTMLRewriter API.
-// Rewrites iframe/src, script/src, img/src, link/href in the initial HTML
-// to go through /proxy/ before the browser starts loading them. This catches
-// assets present at initial load — the MutationObserver only catches ones
-// injected later by JS.
 class SrcAttrRewriter {
   constructor(baseURL, workerOrigin, attr) {
     this.baseURL = baseURL;
@@ -107,7 +87,6 @@ class SrcAttrRewriter {
     el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + abs.host + abs.pathname + abs.search);
   }
 }
-
 function rewriteIframesAndAssets(html, baseURL, workerOrigin) {
   var rewriter = new HTMLRewriter()
     .on('iframe[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
@@ -116,7 +95,6 @@ function rewriteIframesAndAssets(html, baseURL, workerOrigin) {
     .on('link[href]', new SrcAttrRewriter(baseURL, workerOrigin, 'href'));
   return rewriter.transform(new Response(html)).text();
 }
-
 function blockAdsInHTML(html) {
   html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
   html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
@@ -129,9 +107,7 @@ function blockAdsInHTML(html) {
   html = html.replace(/<div[^>]*id="google_ads[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
   return html;
 }
-
 var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>';
-
 var SANDBOX_SCRIPT = '<script>(function(){' +
   'var SELF_ORIGIN=self.location.origin;' +
   'var RUN_HEAVY=true;' +
@@ -140,7 +116,7 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
       'RUN_HEAVY=(window.parent.location.origin!==SELF_ORIGIN);' +
     '}' +
   '}catch(e){' +
-    'RUN_HEAVY=true;' + // parent is cross-origin — we don't know who embedded us, stay safe and full-featured
+    'RUN_HEAVY=true;' +
   '}' +
   'var REAL_BASE="__REAL_BASE__";' +
   'var REAL_ORIGIN="__REAL_ORIGIN__";' +
@@ -153,13 +129,6 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
       'return SELF_ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
     '}catch(e){return u;}' +
   '}' +
-
-  // Defense-in-depth: some frameworks (YouTube's Polymer/Kevlar stack)
-  // cache a direct reference to the native History methods and bypass
-  // our prototype patch entirely. When that happens, replaceState/pushState
-  // with a real-domain URL throws a SecurityError that crashes custom
-  // element lifecycle callbacks. Swallow just that specific error so
-  // the page keeps rendering instead of hanging.
   'window.addEventListener("error",function(e){' +
     'if(e.error&&e.error.name==="SecurityError"&&/replaceState|pushState/.test(e.message||"")){' +
       'e.preventDefault();' +
@@ -167,14 +136,6 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
       'return true;' +
     '}' +
   '},true);' +
-
-  // --- URL reporter: postMessage current URL to parent for URL bar tracking ---
-  // Runs in EVERY frame. Two paths:
-  //  (1) Same-origin parent (HyperZProxy nested in HyperZProxy): send directly,
-  //      no handshake needed — we can verify the parent via location.origin.
-  //  (2) Cross-origin parent (third-party embed): only send if the parent has
-  //      explicitly subscribed via an hzp-subscribe message. This opt-in model
-  //      prevents leaking browsing URLs to embedders that haven't asked.
   'var subscribedOrigins=new Set();' +
   'window.addEventListener("message",function(e){' +
     'if(e.data&&e.data.type==="hzp-subscribe"){' +
@@ -203,8 +164,6 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   '}' +
   'reportUrl();' +
   'setInterval(reportUrl,500);' +
-
-  // --- lightweight patches: run in EVERY frame, top and nested ---
   'try{' +
     'var _fetch=window.fetch;' +
     'window.fetch=function(input,init){' +
@@ -272,13 +231,6 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
       'e.preventDefault();f.action=toProxy(f.action);f.submit();' +
     '}' +
   '},true);' +
-
-  // --- heavy patches: skipped when the DIRECT PARENT is another HyperZProxy
-  // frame (same-origin parent) to avoid doubling up inside the game iframe.
-  // Full sandbox runs when we're top-level, OR when our parent is a different
-  // origin (third-party embed), OR when the parent is cross-origin and throws
-  // (unreadable — safe default). Each frame only checks its own parent, so this
-  // is correct at any nesting depth.
   'if(RUN_HEAVY){' +
     'try{' +
       'if(window.top!==window.self){' +
@@ -403,34 +355,17 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
     '}catch(e){}' +
   '}' +
 '})();</script>';
-
-// JS source rewriter: rewrites `location.href =`, `location =`, `document.location =`
-// in JavaScript source to go through the proxy. This is the ONLY way to catch
-// the non-configurable `location.href` setter — rewrite the source code itself.
-// Applied to both inline <script> blocks in HTML and external .js responses.
 function rewriteJsSource(js) {
-  // Rewrite: location.href = "url" → location.href = "/proxy/encoded"
-  // Rewrite: location = "url" → location.href = "/proxy/encoded"
-  // Rewrite: document.location = "url" → document.location = "/proxy/encoded"
-  // Rewrite: window.location = "url" → window.location = "/proxy/encoded"
-  // We rewrite assignment targets, not reads, to avoid breaking code that
-  // reads location.href for comparison.
-
-  // Pattern: (location|location.href|document.location|window.location)\s*=\s*("..."|'...'|`...`)
   var assignPattern = /((?:window\.|document\.)?location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\2/gi;
   js = js.replace(assignPattern, function(match, target, quote, url) {
-    // Only rewrite if it's an absolute URL (has ://)
     if (/^https?:\/\//i.test(url)) {
       return target + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
     }
-    // Protocol-relative URLs (//example.com)
     if (url.indexOf('//') === 0) {
       return target + ' = ' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
     }
     return match;
   });
-
-  // Rewrite: location.assign("url") and location.replace("url")
   var methodPattern = /((?:window\.|document\.)?location)\.(assign|replace)\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3\s*\)/gi;
   js = js.replace(methodPattern, function(match, loc, method, quote, url) {
     if (/^https?:\/\//i.test(url)) {
@@ -441,8 +376,6 @@ function rewriteJsSource(js) {
     }
     return match;
   });
-
-  // Rewrite: window.open("url", ...)
   var openPattern = /window\.open\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\1/gi;
   js = js.replace(openPattern, function(match, quote, url) {
     if (/^https?:\/\//i.test(url)) {
@@ -453,8 +386,6 @@ function rewriteJsSource(js) {
     }
     return match;
   });
-
-  // Rewrite: top.location = "url" and parent.location = "url"
   var topPattern = /(top|parent)\.(location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3/gi;
   js = js.replace(topPattern, function(match, scope, loc, quote, url) {
     if (/^https?:\/\//i.test(url)) {
@@ -462,23 +393,16 @@ function rewriteJsSource(js) {
     }
     return match;
   });
-
   return js;
 }
-
-// Rewrite inline <script> blocks in HTML
 function rewriteInlineScripts(html) {
   return html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, function(match, attrs, content) {
-    // Skip scripts with src attribute (external scripts)
     if (/\bsrc\s*=/i.test(attrs)) return match;
-    // Skip empty scripts
     if (!content.trim()) return match;
-    // Rewrite the JS source
     var rewritten = rewriteJsSource(content);
     return '<script' + attrs + '>' + rewritten + '</script>';
   });
 }
-
 function parseUniversalURL(pathname, search) {
   var targetPath = pathname.charAt(0) === '/' ? pathname.slice(1) : pathname;
   if (!targetPath) return null;
@@ -508,12 +432,9 @@ function parseUniversalURL(pathname, search) {
   }
   return search ? 'https://' + targetURL + search : 'https://' + targetURL;
 }
-
 async function handleRequest(request) {
   var url = new URL(request.url);
   var pathname = url.pathname;
-
-  // CORS preflight
   if (request.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
@@ -525,8 +446,6 @@ async function handleRequest(request) {
       }
     });
   }
-
-  // CloudMoon: full-screen iframe to the classroom proxy
   if (isCloudMoonPath(pathname)) {
     var targetPath = pathname + url.search;
     var _d = ['app', 'com'], _n = 'cloudmoon', _w = 'web';
@@ -534,7 +453,6 @@ async function handleRequest(request) {
     var cloudmoonUrl = 'https://' + cmDomain + targetPath.replace(new RegExp('^\/(web\\.)?' + _n + _d[0] + '\\.' + _d[1]), '');
     var encoded = encodeUrl(cloudmoonUrl);
     var iframeSrc = CLOUDMOON_PROXY + '?u=' + encoded;
-
     var cmHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1">' +
       '<title>Home - Classroom</title>' +
@@ -545,7 +463,6 @@ async function handleRequest(request) {
       ' allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad"' +
       ' sandbox="allow-forms allow-modals allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock"' +
       '></iframe></body></html>';
-
     return new Response(cmHtml, {
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
@@ -553,14 +470,11 @@ async function handleRequest(request) {
       }
     });
   }
-
   if (pathname === '/' || pathname === '') {
     return new Response('url not specified', {
       headers: { 'Content-Type': 'text/plain' }
     });
   }
-
-  // Normal proxy: direct-fetch
   var targetURL = parseUniversalURL(pathname, url.search);
   if (!targetURL) {
     return new Response('Invalid URL', { status: 400 });
@@ -568,20 +482,13 @@ async function handleRequest(request) {
   try { new URL(targetURL); } catch(e) {
     return new Response('Invalid URL', { status: 400 });
   }
-
   if (isAdRequest(targetURL)) {
     return new Response('', { status: 204 });
   }
-
-  // Fetch the target — forward the original request's method, body, and headers
-  // so POST/PUT requests (sign-up forms, API calls, etc.) work correctly.
-  // Use redirect:'follow' so Workers follows redirects automatically.
   var fwdHeaders = new Headers(request.headers);
   fwdHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
   fwdHeaders.delete('Host');
   fwdHeaders.delete('Origin');
-  // Keep Referer if the browser sent one — some CDNs (e.g. googlevideo.com)
-  // reject or degrade requests without it.
   fwdHeaders.delete('cf-connecting-ip');
   fwdHeaders.delete('cf-ray');
   fwdHeaders.delete('cf-visitor');
@@ -594,7 +501,6 @@ async function handleRequest(request) {
   fwdHeaders.delete('sec-fetch-mode');
   fwdHeaders.delete('sec-fetch-dest');
   fwdHeaders.delete('sec-fetch-user');
-
   var fetchOpts = {
     method: request.method,
     headers: fwdHeaders,
@@ -603,24 +509,17 @@ async function handleRequest(request) {
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     fetchOpts.body = request.body;
   }
-
   var resp;
   try {
     resp = await fetch(targetURL, fetchOpts);
   } catch(err) {
     return new Response('Failed to fetch: ' + (err.message || err), { status: 502 });
   }
-
   var contentType = (resp.headers.get('Content-Type') || '').toLowerCase();
-
-  // Non-HTML: pass through with CORS + stripped security headers.
-  // For JavaScript responses, also rewrite navigation calls in the source.
   if (contentType.indexOf('text/html') === -1) {
     var passH = new Headers(resp.headers);
     passH.set('Access-Control-Allow-Origin', '*');
     stripSecurityHeaders(passH);
-
-    // Rewrite JS source for navigation calls
     if (contentType.indexOf('javascript') !== -1) {
       try {
         var jsSource = await resp.text();
@@ -630,18 +529,13 @@ async function handleRequest(request) {
           status: resp.status, statusText: resp.statusText, headers: passH
         });
       } catch(e) {
-        // If JS rewrite fails, pass through the original
       }
     }
-
     if (contentType.indexOf('image/') !== -1 || contentType.indexOf('font/') !== -1 || contentType.indexOf('css') !== -1) {
       passH.set('Cache-Control', 'public, max-age=86400');
     }
-    // Preserve range-request support for video/audio streaming
     if (resp.headers.has('Content-Range')) passH.set('Content-Range', resp.headers.get('Content-Range'));
     if (resp.headers.has('Accept-Ranges')) passH.set('Accept-Ranges', resp.headers.get('Accept-Ranges'));
-
-    // Cookie forwarding — rewrite Set-Cookie so it applies to the Worker's own origin
     if (typeof resp.headers.getSetCookie === 'function') {
       var cookies1 = resp.headers.getSetCookie();
       if (cookies1.length) {
@@ -652,51 +546,35 @@ async function handleRequest(request) {
         });
       }
     }
-
     return new Response(resp.body, {
       status: resp.status, statusText: resp.statusText, headers: passH
     });
   }
-
-  // HTML: use HTMLRewriter to rewrite iframe/script/img/link src server-side
-  // (catches assets in initial HTML before JS runs), then inject <base>,
-  // strip headers, block ads, block nav, rewrite inline JS scripts.
   var pageHtml;
   try {
     pageHtml = await rewriteIframesAndAssets(await resp.clone().text(), resp.url, url.origin);
   } catch(err) {
-    // Fallback to plain text() if HTMLRewriter fails
     try {
       pageHtml = await resp.text();
     } catch(err2) {
       return new Response('Failed to read response: ' + (err2.message || err2), { status: 502 });
     }
   }
-
   pageHtml = blockAdsInHTML(pageHtml);
-  // Use resp.url (final URL after redirects) for <base> so assets resolve correctly
   pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
   pageHtml = injectInHead(pageHtml, AD_BLOCKER);
-  // Fill in __REAL_BASE__ (full URL for relative resolution) and
-  // __REAL_ORIGIN__ (origin for same-origin checks) so toProxy resolves
-  // relative URLs against the real page's full URL, not just the bare origin
-  // (bare origin causes doubled paths like youtube.com/youtube.com?x=1).
   var realBase, realOrigin;
   try { var _u = new URL(resp.url); realBase = _u.href; realOrigin = _u.origin; } catch(e) { realBase = ''; realOrigin = ''; }
   pageHtml = injectInHead(pageHtml, SANDBOX_SCRIPT
     .replace('__REAL_BASE__', realBase)
     .replace('__REAL_ORIGIN__', realOrigin));
-  // Rewrite navigation calls in inline <script> blocks
   pageHtml = rewriteInlineScripts(pageHtml);
-
   var htmlH = new Headers(resp.headers);
   htmlH.set('Content-Type', 'text/html; charset=utf-8');
   htmlH.set('Access-Control-Allow-Origin', '*');
   stripSecurityHeaders(htmlH);
   htmlH.set('Content-Security-Policy',
     "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-ancestors *");
-
-  // Cookie forwarding — rewrite Set-Cookie so it applies to the Worker's own origin
   if (typeof resp.headers.getSetCookie === 'function') {
     var cookies2 = resp.headers.getSetCookie();
     if (cookies2.length) {
@@ -707,14 +585,10 @@ async function handleRequest(request) {
       });
     }
   }
-
   return new Response(pageHtml, {
     status: resp.status, statusText: resp.statusText, headers: htmlH
   });
 }
-
-// Cloudflare Workers entry point — wrapped in try/catch so any error
-// returns a readable message instead of Error 1101.
 export default {
   async fetch(request, env, ctx) {
     try {
