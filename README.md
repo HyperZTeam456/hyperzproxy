@@ -1,4 +1,4 @@
-# HyperZ CORS Proxy
+# HyperZProxy
 
 A simple public proxy for bypassing CORS restrictions on websites.
 
