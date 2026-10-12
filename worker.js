@@ -208,7 +208,9 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
   '}catch(e){}' +
   'try{' +
     'var _WS=window.WebSocket;' +
+    'var WS_RELAY=true;' +
     'var wsProxy=function(u){' +
+      'if(!WS_RELAY)return u;' +
       'try{' +
         'var abs=new URL(u,REAL_BASE||document.baseURI);' +
         'var sc=null;' +
@@ -220,7 +222,13 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
       '}catch(e){}' +
       'return u;' +
     '};' +
-    'window.WebSocket=new Proxy(_WS,{construct:function(T,a,n){if(a.length)a[0]=wsProxy(a[0]);return Reflect.construct(T,a,n);}});' +
+    'window.WebSocket=new Proxy(_WS,{construct:function(T,a,n){' +
+      'var o=a[0];' +
+      'if(a.length)a[0]=wsProxy(o);' +
+      'var s=Reflect.construct(T,a,n);' +
+      'try{Object.defineProperty(s,"url",{get:function(){return new URL(o,REAL_BASE||document.baseURI).href.replace(/^http/,"ws");}});}catch(e){}' +
+      'return s;' +
+    '}});' +
   '}catch(e){}' +
   'var lastGesture=0;' +
   'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
@@ -448,6 +456,17 @@ function parseUniversalURL(pathname, search) {
   }
   return search ? 'https://' + targetURL + search : 'https://' + targetURL;
 }
+function unmangleHost(target, ownHost) {
+  var u;
+  try { u = new URL(target); } catch(e) { return target; }
+  var suffix = '.' + ownHost;
+  var host = u.hostname;
+  if (host.length <= suffix.length || host.slice(-suffix.length) !== suffix) return target;
+  var seg = u.pathname.split('/')[1] || '';
+  if (seg.indexOf('.') === -1) return target;
+  var rest = u.pathname.slice(seg.length + 1) || '/';
+  return u.protocol + '//' + host.slice(0, -suffix.length) + '.' + seg + rest + u.search;
+}
 function wsTarget(pathname, search) {
   var m = pathname.match(/^\/proxy-ws\/(wss|ws)\/([^\/]+)(\/.*)?$/);
   if (!m) return null;
@@ -460,7 +479,7 @@ function relayClose(ws, e) {
 }
 async function handleWebSocket(request, url) {
   if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket upgrade', { status: 426 });
-  var target = wsTarget(url.pathname, url.search);
+  var target = unmangleHost(wsTarget(url.pathname, url.search), url.hostname);
   var origin;
   try { origin = new URL(target).origin; } catch(e) { return new Response('Invalid WebSocket URL', { status: 400 }); }
   var up = new Headers({
@@ -546,6 +565,7 @@ async function handleRequest(request) {
   try { new URL(targetURL); } catch(e) {
     return new Response('Invalid URL', { status: 400 });
   }
+  targetURL = unmangleHost(targetURL, url.hostname);
   if (isAdRequest(targetURL)) {
     return new Response('', { status: 204 });
   }
