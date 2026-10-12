@@ -206,6 +206,22 @@ var SANDBOX_SCRIPT = '<script>(function(){' +
       '});' +
     '}' +
   '}catch(e){}' +
+  'try{' +
+    'var _WS=window.WebSocket;' +
+    'var wsProxy=function(u){' +
+      'try{' +
+        'var abs=new URL(u,REAL_BASE||document.baseURI);' +
+        'var sc=null;' +
+        'if(abs.protocol==="wss:"||abs.protocol==="https:")sc="wss";' +
+        'else if(abs.protocol==="ws:"||abs.protocol==="http:")sc="ws";' +
+        'if(sc&&abs.host!==location.host){' +
+          'return SELF_ORIGIN.replace(/^http/,"ws")+"/proxy-ws/"+sc+"/"+abs.host+abs.pathname+abs.search;' +
+        '}' +
+      '}catch(e){}' +
+      'return u;' +
+    '};' +
+    'window.WebSocket=new Proxy(_WS,{construct:function(T,a,n){if(a.length)a[0]=wsProxy(a[0]);return Reflect.construct(T,a,n);}});' +
+  '}catch(e){}' +
   'var lastGesture=0;' +
   'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
   'try{' +
@@ -432,6 +448,53 @@ function parseUniversalURL(pathname, search) {
   }
   return search ? 'https://' + targetURL + search : 'https://' + targetURL;
 }
+function wsTarget(pathname, search) {
+  var m = pathname.match(/^\/proxy-ws\/(wss|ws)\/([^\/]+)(\/.*)?$/);
+  if (!m) return null;
+  return (m[1] === 'ws' ? 'http://' : 'https://') + m[2] + (m[3] || '/') + (search || '');
+}
+function relayClose(ws, e) {
+  var code = e.code;
+  if (!code || code === 1005 || code === 1006 || code === 1015) code = 1000;
+  try { ws.close(code, e.reason || ''); } catch(_) {}
+}
+async function handleWebSocket(request, url) {
+  if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket upgrade', { status: 426 });
+  var target = wsTarget(url.pathname, url.search);
+  var origin;
+  try { origin = new URL(target).origin; } catch(e) { return new Response('Invalid WebSocket URL', { status: 400 }); }
+  var up = new Headers({
+    'Upgrade': 'websocket',
+    'Origin': origin,
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  });
+  ['Cookie', 'Sec-WebSocket-Protocol'].forEach(function(h) {
+    var v = request.headers.get(h);
+    if (v) up.set(h, v);
+  });
+  var resp;
+  try { resp = await fetch(target, { headers: up }); } catch(err) {
+    return new Response('WebSocket upstream failed: ' + (err.message || err), { status: 502 });
+  }
+  var upWs = resp.webSocket;
+  if (!upWs) return new Response('Upstream refused WebSocket', { status: 502 });
+  upWs.accept();
+  var pair = new WebSocketPair();
+  var client = pair[0], server = pair[1];
+  server.accept();
+  server.addEventListener('message', function(e) { try { upWs.send(e.data); } catch(_) {} });
+  upWs.addEventListener('message', function(e) { try { server.send(e.data); } catch(_) {} });
+  server.addEventListener('close', function(e) { relayClose(upWs, e); });
+  upWs.addEventListener('close', function(e) { relayClose(server, e); });
+  server.addEventListener('error', function() { relayClose(upWs, {}); });
+  upWs.addEventListener('error', function() { relayClose(server, {}); });
+  var proto = resp.headers.get('Sec-WebSocket-Protocol');
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+    headers: proto ? { 'Sec-WebSocket-Protocol': proto } : {}
+  });
+}
 async function handleRequest(request) {
   var url = new URL(request.url);
   var pathname = url.pathname;
@@ -446,6 +509,7 @@ async function handleRequest(request) {
       }
     });
   }
+  if (pathname.indexOf('/proxy-ws/') === 0) return handleWebSocket(request, url);
   if (isCloudMoonPath(pathname)) {
     var targetPath = pathname + url.search;
     var _d = ['app', 'com'], _n = 'cloudmoon', _w = 'web';
