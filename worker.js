@@ -1,15 +1,12 @@
-
-
 var HZP = {
   AD_BLOCK: true,
   WEB_SOCKET: true,
   CACHE_ASSETS: true,
   COOKIE_ISOLATION: true,
   CROSS_ORIGIN_ISOLATION: true,
+  CLIENT_VERSION: 15,
   UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 };
-
-var SJ_PREFIX = '/sj';
 
 var HIDDEN_ATTR = 'hz-attr-';
 
@@ -38,12 +35,24 @@ var AD_PATTERNS = [
   'criteo.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net',
   'adsafeprotected.com', 'moatads.com', 'scorecardresearch.com',
   '/ads/', '/ad/', '/advert/', '/advertisement/', '/adsense/',
-  '/adserver/', '/analytics/', 'prebid', 'advertis', 'banner', 'popup'
+  '/adserver/', '/analytics/', 'prebid'
 ];
 var AD_RE = new RegExp(AD_PATTERNS.map(function (s) {
   return s.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
 }).join('|'), 'i');
 function isAdRequest(u) { return AD_RE.test(u || ''); }
+
+var AD_NAV_HOSTS = ['googlesyndication.com', 'doubleclick.net', 'googleadservices.com',
+  'adnxs.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net', 'criteo.com',
+  'taboola.com', 'outbrain.com', 'adsafeprotected.com', 'moatads.com',
+  'advertising.com', 'scorecardresearch.com', 'amazon-adsystem.com'];
+function isAdNavHost(h) {
+  for (var i = 0; i < AD_NAV_HOSTS.length; i++) {
+    var d = AD_NAV_HOSTS[i];
+    if (h === d || h.slice(-(d.length + 1)) === '.' + d) return true;
+  }
+  return false;
+}
 
 function heavyAdCss() {
   return [
@@ -147,11 +156,39 @@ function parseUniversalURL(pathname, search, hash) {
   if (url.indexOf('http://') === 0 || url.indexOf('https://') === 0) return url + search + hash;
   return 'https://' + url + search + hash;
 }
-function parseProxiedPath(pathname, search, hash) {
-  var p = pathname || '';
-  if (p === SJ_PREFIX) p = '/';
-  else if (p.indexOf(SJ_PREFIX + '/') === 0) p = p.slice(SJ_PREFIX.length);
-  return parseUniversalURL(p, search, hash);
+function isProxiedPath(p) {
+  p = String(p == null ? '' : p);
+  return p.indexOf('/proxy/') === 0 || p.indexOf('/http://') === 0 || p.indexOf('/https://') === 0 || p.indexOf('/ws/') === 0 || p.indexOf('/wss/') === 0;
+}
+function refererRecovery(request) {
+  try {
+    var m = request.method;
+    if (m !== 'GET' && m !== 'HEAD') return null;
+    var ref = request.headers.get('Referer');
+    if (!ref) return null;
+    var own = new URL(request.url);
+    var ru;
+    try { ru = new URL(ref); } catch (e) { return null; }
+    if (ru.origin !== own.origin) return null;
+    var refPath = ru.pathname || '';
+    var refDecoded = refPath;
+    try { refDecoded = decodeURIComponent(refPath); } catch (e) {}
+    if (refDecoded.indexOf('://') === -1) return null;
+    var realRef = parseUniversalURL(refPath, ru.search, '');
+    if (!realRef) return null;
+    if (!/^https?:\/\//i.test(realRef)) return null;
+    var target;
+    try { target = new URL(own.pathname + own.search, realRef); } catch (e) { return null; }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return null;
+    if (target.origin === own.origin) return null;
+    return new Response(null, {
+      status: 302,
+      headers: {
+        'Location': own.origin + '/' + target.href,
+        'Cache-Control': 'no-store'
+      }
+    });
+  } catch (e) { return null; }
 }
 
 
@@ -164,6 +201,11 @@ function isHtmlContentType(ct) {
   if (!ct) return false;
   var e = ct.toLowerCase().split(';')[0].trim();
   return e === 'text/html' || e === 'application/xhtml+xml' || e === '';
+}
+function isCssContentType(ct) {
+  if (!ct) return false;
+  var e = ct.toLowerCase().split(';')[0].trim();
+  return e === 'text/css' || /\+css$/.test(e);
 }
 
 
@@ -197,14 +239,24 @@ function rewriteSetCookie(c, host) {
 
 
 var CSS_URL_RE = /url\((?:\s*"((?:\\.|[^"])+)"\s*|\s*'((?:\\.|[^'])+)'\s*|((?!\s*['"])(?!\s*\))(?:\\.|[^)])+?))\)/g;
+function stripEntityQuotes(u) {
+  var lead = '';
+  var trail = '';
+  var m1 = /^&(?:quot|#0*34|#x0*22);/i.exec(u);
+  if (m1) { lead = m1[0]; u = u.slice(lead.length); }
+  var m2 = /&(?:quot|#0*34|#x0*22);$/i.exec(u);
+  if (m2) { trail = m2[0]; u = u.slice(0, u.length - trail.length); }
+  return { u: u, lead: lead, trail: trail };
+}
 function cssProxyUrl(url, realBase, proxyOrigin) {
   try {
+    if (url.charAt(0) === '#') return url;
     var abs = new URL(url, realBase);
     var p = abs.protocol;
     if (p === 'data:' || p === 'blob:' || p === 'javascript:' || p === 'about:' || p === 'mailto:') return url;
     if (p !== 'http:' && p !== 'https:') return url;
-    if (abs.pathname.indexOf('/proxy/') === 0 || abs.pathname.indexOf(SJ_PREFIX + '/proxy/') === 0) return url;
-    return proxyOrigin + SJ_PREFIX + '/proxy/' + abs.href;
+    if (isProxiedPath(abs.pathname)) return url;
+    return proxyOrigin + '/' + abs.href;
   } catch (e) { return url; }
 }
 function rewriteCssUrls(css, realBase, proxyOrigin) {
@@ -212,7 +264,13 @@ function rewriteCssUrls(css, realBase, proxyOrigin) {
   var out = css.replace(CSS_URL_RE, function (m, dq, sq, unq) {
     var u = dq || sq || unq;
     if (!u) return m;
-    return m.replace(u, cssProxyUrl(u.trim(), realBase, proxyOrigin));
+    var e = stripEntityQuotes(u.trim());
+    if (!e.u) return m;
+    var oldFull = (e.lead || e.trail) ? (e.lead + e.u + e.trail) : u.trim();
+    var k = m.indexOf(oldFull);
+    if (k < 0) return m;
+    var proxied = e.lead + cssProxyUrl(e.u.trim(), realBase, proxyOrigin) + e.trail;
+    return m.slice(0, k) + proxied + m.slice(k + oldFull.length);
   });
     out = out.replace(/@import\s+(['"])([^'"]+)\1/g, function (m, q, u) {
     if (!u) return m;
@@ -227,8 +285,8 @@ function rewriteResponseLinkHeader(value, realBase, proxyOrigin) {
       try {
         var abs = new URL(target, realBase);
         if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return m;
-        if (abs.pathname.indexOf('/proxy/') === 0 || abs.pathname.indexOf(SJ_PREFIX + '/proxy/') === 0) return m;
-        return '<' + proxyOrigin + SJ_PREFIX + '/proxy/' + abs.href + '>';
+        if (isProxiedPath(abs.pathname)) return m;
+        return '<' + proxyOrigin + '/' + abs.href + '>';
       } catch (e) { return m; }
     });
   } catch (e) { return value; }
@@ -240,8 +298,8 @@ function rewriteResponseUrlHeaders(headers, realUrl, proxyOrigin) {
     try {
       var abs = new URL(v, realUrl || undefined);
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') { headers.delete(name); return; }
-      if (abs.pathname.indexOf('/proxy/') === 0 || abs.pathname.indexOf(SJ_PREFIX + '/proxy/') === 0) { headers.delete(name); return; }
-      headers.set(name, proxyOrigin + SJ_PREFIX + '/proxy/' + abs.href);
+      if (isProxiedPath(abs.pathname)) { headers.delete(name); return; }
+      headers.set(name, proxyOrigin + '/' + abs.href);
     } catch (e) { headers.delete(name); }
   });
   var link = headers.get('link');
@@ -249,49 +307,293 @@ function rewriteResponseUrlHeaders(headers, realUrl, proxyOrigin) {
 }
 
 
-var JS_ASSIGN_RE    = /((?:window\.|document\.|self\.|top\.|parent\.)?(?:location|documentURL)\.?(?:href)?)\s*=\s*(["'])([^"'\s]+)\2/g;
-var JS_METHOD_RE    = /((?:window\.|document\.|self\.)?location)\.(assign|replace)\s*\(\s*(["'])([^"'\s]+)\3/g;
-var JS_OPEN_RE      = /(^|[^\w.$])(?:window\.)?open\s*\(\s*(["'])([^"'\s]+)\2/g;
-var JS_WORKER_RE    = /new\s+(?:Worker|SharedWorker)\s*\(\s*(["'])([^"'\s]+)\1/g;
-var JS_WS_RE        = /new\s+WebSocket\s*\(\s*(["'])((?:wss?|https?):\/\/[^"'\s]+)\1/g;
-var JS_IMPORT_RE    = /importScripts\s*\(\s*(["'])([^"'\s]+)\1/g;
-var JS_BEACON_RE    = /(?:navigator\.)?sendBeacon\s*\(\s*(["'])([^"'\s]+)\1/g;
-var JS_REQUEST_RE   = /new\s+Request\s*\(\s*(["'])([^"'\s]+)\1/g;
-var JS_POSTMSG_RE   = /(^|[^\w$."'`])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.postMessage(\s*\()/g;
-var JS_LOC_PROP_RE  = /(?:\b(?:window|self|document|top|parent)\.)?\blocation\.(pathname|href|search|hash|hostname|host|origin|port|protocol)(?!\s*(?:=[^=]|[+\-\*/%]=))/g;
+var JS_KEYWORDS = { return: 1, typeof: 1, instanceof: 1, in: 1, of: 1, new: 1, delete: 1, void: 1, throw: 1, case: 1, do: 1, else: 1, yield: 1, await: 1, default: 1, extends: 1 };
+var JS_REGEX_PRE = '(,=:[!&|?{};+-*%~^<>';
+function jsIsSpace(c) { return c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v'; }
+function jsIsIdent(c) {
+  var k = c.charCodeAt(0);
+  return (k >= 97 && k <= 122) || (k >= 65 && k <= 90) || (k >= 48 && k <= 57) || c === '_' || c === '$';
+}
+function computeCodeRanges(js) {
+  var n = js.length;
+  var ranges = [];
+  var codeStart = -1;
+  var stack = ['code'];
+  var brace = [0];
+  var i = 0;
+  var TOKEN_RE = /['"`\/]/g;
+  var sig = '';
+  var lastWord = '';
+  function close(at) { if (codeStart !== -1) { if (at > codeStart) ranges.push([codeStart, at]); codeStart = -1; } }
+  function open(at) { if (codeStart === -1) codeStart = at; }
+  function noteRun(endPos) {
+    var k = endPos - 1;
+    while (k >= 0 && jsIsSpace(js[k])) k--;
+    if (k < 0) return;
+    sig = js[k];
+    if (jsIsIdent(sig)) {
+      var e = k;
+      while (k >= 0 && jsIsIdent(js[k])) k--;
+      lastWord = js.slice(k + 1, e + 1);
+    } else {
+      lastWord = '';
+    }
+  }
+  function canStartRegex() {
+    if (sig === '') return true;
+    if (JS_REGEX_PRE.indexOf(sig) !== -1) return true;
+    if (lastWord && JS_KEYWORDS[lastWord]) return true;
+    return false;
+  }
+  function scanString(q) {
+    close(i);
+    i++;
+    while (i < n) {
+      var j = js.indexOf(q, i);
+      if (j === -1) { i = n; break; }
+      var k = j - 1, esc = 0;
+      while (k >= 0 && js[k] === '\\') { esc++; k--; }
+      if (esc % 2 === 1) { i = j + 1; continue; }
+      i = j + 1;
+      break;
+    }
+    open(i);
+    sig = ')'; lastWord = '';
+  }
+  function scanRegex() {
+    close(i);
+    i++;
+    var inClass = false;
+    while (i < n) {
+      var c = js[i];
+      if (c === '\\') { i += 2; continue; }
+      if (inClass) { if (c === ']') inClass = false; i++; continue; }
+      if (c === '[') { inClass = true; i++; continue; }
+      if (c === '/') { i++; break; }
+      if (c === '\n' || c === '\r') break;
+      i++;
+    }
+    while (i < n && /[a-z]/i.test(js[i])) i++;
+    open(i);
+    sig = ')'; lastWord = '';
+  }
+  while (i < n) {
+    var top = stack[stack.length - 1];
+    if (top === 'tpl') {
+      var bt = js.indexOf('`', i);
+      var itp = js.indexOf('${', i);
+      var bsl = js.indexOf('\\', i);
+      var next = n;
+      if (bt !== -1 && bt < next) next = bt;
+      if (itp !== -1 && itp < next) next = itp;
+      if (bsl !== -1 && bsl < next) next = bsl;
+      if (next >= n) { i = n; break; }
+      var ch = js[next];
+      if (ch === '\\') { i = next + 2; continue; }
+      if (ch === '`') { stack.pop(); brace.pop(); i = next + 1; sig = ')'; lastWord = ''; if (stack[stack.length - 1] === 'code') open(i); continue; }
+      i = next + 2;
+      stack.push('code');
+      brace.push(0);
+      open(i);
+      sig = '{'; lastWord = '';
+      continue;
+    }
+    open(i);
+    TOKEN_RE.lastIndex = i;
+    var mm = TOKEN_RE.exec(js);
+    var nx = mm ? mm.index : n;
+    if (nx >= n) { i = n; break; }
+    if (nx > i) noteRun(nx);
+    if (stack.length > 1 && nx > i) {
+      var run = js.slice(i, nx);
+      var opens = 0, closes = 0, p2 = 0;
+      while ((p2 = run.indexOf('{', p2)) !== -1) { opens++; p2++; }
+      p2 = 0;
+      while ((p2 = run.indexOf('}', p2)) !== -1) { closes++; p2++; }
+      if (closes > opens + brace[brace.length - 1]) {
+        var need = brace[brace.length - 1] + opens + 1;
+        var pos = -1, seen = 0, q = i;
+        while (q < nx) { if (js[q] === '}') { seen++; if (seen === need) { pos = q; break; } } q++; }
+        if (pos !== -1) {
+          close(pos);
+          stack.pop(); brace.pop();
+          i = pos + 1;
+          continue;
+        }
+      }
+      brace[brace.length - 1] = brace[brace.length - 1] + opens - closes;
+    }
+    var c2 = js[nx];
+    if (c2 === "'" || c2 === '"') { i = nx; scanString(c2); continue; }
+    if (c2 === '`') { close(nx); stack.push('tpl'); brace.push(0); i = nx + 1; continue; }
+    var c3 = js[nx + 1];
+    if (c3 === '/') {
+      close(nx);
+      var nl = js.indexOf('\n', nx + 2);
+      i = nl === -1 ? n : nl;
+      open(i);
+      continue;
+    }
+    if (c3 === '*') {
+      close(nx);
+      var bc = js.indexOf('*/', nx + 2);
+      i = bc === -1 ? n : bc + 2;
+      open(i);
+      continue;
+    }
+    if (canStartRegex()) { i = nx; scanRegex(); continue; }
+    i = nx + 1;
+  }
+  close(n);
+  return ranges;
+}
+function makeInCode(ranges) {
+  return function (pos) {
+    var lo = 0, hi = ranges.length - 1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      var r = ranges[mid];
+      if (pos < r[0]) hi = mid - 1;
+      else if (pos >= r[1]) lo = mid + 1;
+      else return true;
+    }
+    return false;
+  };
+}
 var REWRITE_GUARD = "if(typeof self.__hzpLoc!=='function'){self.__hzpLoc=function(p){try{var l=self.location;var v=l&&l[p];return v==null?'':String(v)}catch(e){return ''}}}\n" +
+  "if(typeof self.__hzpLocObj==='undefined'){self.__hzpLocObj=self.location}\n" +
   "if(typeof self.__hzpPMW!=='function'){self.__hzpPMW=function(w){return w}}\n";
 
+function verHref(href) {
+  try {
+    if (!HZP.CLIENT_VERSION) return href;
+    var u = new URL(href);
+    if (!/\.m?js$/i.test(u.pathname) && !/\.cjs$/i.test(u.pathname)) return href;
+    if (u.searchParams.has('__hzpv')) return href;
+    u.searchParams.set('__hzpv', String(HZP.CLIENT_VERSION));
+    return u.href;
+  } catch (e) { return href; }
+}
 function jsProxyUrl(url, quote, realBase, proxyOrigin) {
   try {
     var u = String(url);
     if (/^(javascript|mailto|tel|about|data|blob):/i.test(u)) return quote + u + quote;
     var abs = u.indexOf('//') === 0 ? new URL('https:' + u) : new URL(u, realBase);
     if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return quote + u + quote;
-    return quote + proxyOrigin + SJ_PREFIX + '/proxy/' + abs.href + quote;
+    return quote + proxyOrigin + '/' + verHref(abs.href) + quote;
   } catch (e) { return quote + url + quote; }
 }
 function jsWsProxyUrl(url, quote, proxyOrigin) {
   try {
     var abs = new URL(url);
     var p = abs.protocol === 'wss:' || abs.protocol === 'https:' ? 'wss' : 'ws';
-    return quote + proxyOrigin + SJ_PREFIX + '/proxy/' + p + '/' + abs.host + abs.pathname + abs.search + quote;
+    return quote + proxyOrigin + '/' + p + '/' + abs.host + abs.pathname + abs.search + quote;
   } catch (e) { return quote + url + quote; }
 }
 
+var JS_PATTERNS = [
+  {
+    pre: true,
+    re: /(^|[^\w$.])((?:(?:window|self|document|top|parent)\.)?\blocation\.(pathname|href|search|hash|hostname|host|origin|port|protocol))(?!\s*(?:=[^=]|[+\-\*/%]=|\+\+|--))/g,
+    make: function (m, pre, expr, prop) { return pre + 'self.__hzpLoc("' + prop + '")'; }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$.])((?:window|self|document|top|parent)\.location)(?![\w$])/g,
+    make: function (m, pre, expr) { return pre + 'self.__hzpLocObj'; }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$.])(?<!\b(?:var|let|const)[ \t\r\n]+)(location)(?=[.\[]|\s*=(?!=))/g,
+    make: function (m, pre, expr) { return pre + 'self.__hzpLocObj'; }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$.])([\w$]+)\.location(?![\w$])(?=$|\s*[;,)\]}\[?]|\s*[+\-*\/%]|\s*(?:==|!=|<=|>=|\?\.?|&&|\|\||\?\?)|\s*\.(?:pathname|href|search|hash|hostname|host|origin|port|protocol|assign|replace|reload|toString|valueOf)\b)/g,
+    make: function (m, pre, ident) { return pre + '(' + ident + '===self||(typeof Window!=="undefined"&&' + ident + ' instanceof Window)?self.__hzpLocObj:(' + ident + ').location)'; }
+  },
+  {
+    pre: false,
+    re: /((?:window\.|document\.|self\.|top\.|parent\.)?(?:location|documentURL)\.?(?:href)?)\s*=\s*(["'])([^"'\s]+)\2/g,
+    make: function (m, lhs, q, u, rb, po) { return lhs + ' = ' + jsProxyUrl(u, q, rb, po); }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$.])((?:(?:window|self|document|top|parent)\.)?location)\.(assign|replace)\s*\(\s*(["'])([^"'\s]+)\4/g,
+    make: function (m, pre, loc, method, q, u, rb, po) { return pre + loc + '.' + method + '(' + jsProxyUrl(u, q, rb, po); }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w.$])(?:window\.)?open\s*\(\s*(["'])([^"'\s]+)\2/g,
+    make: function (m, pre, q, u, rb, po) { return pre + 'open(' + jsProxyUrl(u, q, rb, po); }
+  },
+  {
+    pre: false,
+    re: /new\s+(?:Worker|SharedWorker)\s*\(\s*(["'])([^"'\s]+)\1/g,
+    make: function (m, q, u, rb, po) { return 'new Worker(' + jsProxyUrl(u, q, rb, po); }
+  },
+  {
+    pre: false,
+    re: /new\s+WebSocket\s*\(\s*(["'])((?:wss?|https?):\/\/[^"'\s]+)\1/g,
+    make: function (m, q, u, rb, po) { return 'new WebSocket(' + jsWsProxyUrl(u, q, po); }
+  },
+  {
+    pre: false,
+    re: /importScripts\s*\(\s*(["'])([^"'\s]+)\1/g,
+    make: function (m, q, u, rb, po) { return 'importScripts(' + jsProxyUrl(u, q, rb, po); }
+  },
+  {
+    pre: false,
+    re: /(?:navigator\.)?sendBeacon\s*\(\s*(["'])([^"'\s]+)\1/g,
+    make: function (m, q, u, rb, po) { return 'sendBeacon(' + jsProxyUrl(u, q, rb, po); }
+  },
+  {
+    pre: false,
+    re: /new\s+Request\s*\(\s*(["'])([^"'\s]+)\1/g,
+    make: function (m, q, u, rb, po) { return 'new Request(' + jsProxyUrl(u, q, rb, po); }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$."'`])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.postMessage(\s*\()/g,
+    make: function (m, pre, obj, paren) { return pre + 'self.__hzpPMW(' + obj + ').postMessage' + paren; }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$."'`])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\?\.postMessage(\s*\()/g,
+    make: function (m, pre, obj, paren) { return pre + 'self.__hzpPMW(' + obj + ').postMessage' + paren; }
+  }
+];
+
 function rewriteJsSource(js, realBase, proxyOrigin) {
   var rb = realBase || '', po = proxyOrigin || '';
-  js = js.replace(JS_LOC_PROP_RE, function (m, prop) { return 'self.__hzpLoc("' + prop + '")'; });
-  js = js.replace(JS_ASSIGN_RE,   function (m, lhs, q, u) { return lhs + ' = ' + jsProxyUrl(u, q, rb, po); });
-  js = js.replace(JS_METHOD_RE,   function (m, loc, method, q, u) { return loc + '.' + method + '(' + jsProxyUrl(u, q, rb, po) + ')'; });
-  js = js.replace(JS_OPEN_RE,     function (m, pre, q, u) { return pre + 'open(' + jsProxyUrl(u, q, rb, po); });
-  js = js.replace(JS_WORKER_RE,   function (m, q, u) { return 'new Worker(' + jsProxyUrl(u, q, rb, po); });
-  js = js.replace(JS_WS_RE,       function (m, q, u) { return 'new WebSocket(' + jsWsProxyUrl(u, q, po); });
-  js = js.replace(JS_IMPORT_RE,   function (m, q, u) { return 'importScripts(' + jsProxyUrl(u, q, rb, po); });
-  js = js.replace(JS_BEACON_RE,   function (m, q, u) { return 'sendBeacon(' + jsProxyUrl(u, q, rb, po); });
-  js = js.replace(JS_REQUEST_RE,  function (m, q, u) { return 'new Request(' + jsProxyUrl(u, q, rb, po); });
-  js = js.replace(JS_POSTMSG_RE,  function (m, pre, obj, paren) { return pre + 'self.__hzpPMW(' + obj + ').postMessage' + paren; });
-  return js;
+  var edits = [];
+  for (var p = 0; p < JS_PATTERNS.length; p++) {
+    var pat = JS_PATTERNS[p];
+    var re = new RegExp(pat.re.source, pat.re.flags);
+    var m;
+    while ((m = re.exec(js)) !== null) {
+      if (m[0].length === 0) { re.lastIndex++; continue; }
+      var rep = pat.make.apply(null, [m[0]].concat(Array.prototype.slice.call(m, 1)).concat([rb, po]));
+      if (rep === m[0]) continue;
+      var coreStart = pat.pre ? m.index + String(m[1] || '').length : m.index;
+      edits.push({ start: m.index, end: m.index + m[0].length, core: coreStart, rep: rep, pat: p });
+    }
+  }
+  if (!edits.length) return js;
+  edits.sort(function (a, b) { return a.start - b.start || a.end - b.end || a.pat - b.pat; });
+  var ranges = computeCodeRanges(js);
+  var inCode = makeInCode(ranges);
+  var out = '';
+  var pos = 0;
+  for (var e = 0; e < edits.length; e++) {
+    var ed = edits[e];
+    if (ed.start < pos) continue;
+    if (!inCode(ed.core)) continue;
+    out += js.slice(pos, ed.start) + ed.rep;
+    pos = ed.end;
+  }
+  out += js.slice(pos);
+  return out;
 }
 
 function scriptNeedsRewrite(src) {
@@ -358,7 +660,7 @@ function rewriteMetaRefresh(content, realBase, proxyOrigin) {
   var abs;
   try { abs = new URL(parsed.url, realBase); } catch (e) { return null; }
   if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
-  var proxied = proxyOrigin + SJ_PREFIX + '/proxy/' + abs.href;
+  var proxied = proxyOrigin + '/' + abs.href;
   return parsed.time + '; URL=' + proxied;
 }
 
@@ -378,7 +680,9 @@ function stripSecurityHeaders(h) {
   h.delete('X-Content-Type-Options');
   h.delete('Strict-Transport-Security');
   h.delete('Cross-Origin-Embedder-Policy');
+  h.delete('Cross-Origin-Embedder-Policy-Report-Only');
   h.delete('Cross-Origin-Opener-Policy');
+  h.delete('Cross-Origin-Opener-Policy-Report-Only');
   h.delete('Cross-Origin-Resource-Policy');
   h.delete('Permissions-Policy');
   h.delete('Expect-CT');
@@ -397,6 +701,24 @@ function escapeHtmlAttr(s) {
 }
 
 
+function normalizeWrappedUrl(target) {
+  try {
+    var tu = new URL(target);
+    var p = tu.pathname || '';
+    if (p.charAt(0) === '/') p = p.slice(1);
+    if (p.indexOf('proxy/') === 0) p = p.slice(6);
+    var fixed = p.replace(/^(https?):\/(?!\/)/, '$1://');
+    if (fixed.indexOf('://') !== -1) {
+      var nu = new URL(fixed);
+      var href = nu.href;
+      if (tu.search && href.indexOf('?') === -1) href += tu.search;
+      if (tu.hash && href.indexOf('#') === -1) href += tu.hash;
+      return href;
+    }
+  } catch (e) {}
+  return null;
+}
+
 var HZP_CLIENT_SRC = `(function(){
 "use strict";
 if (self.__hzpClient) return;
@@ -406,7 +728,28 @@ var HIDDEN = 'hz-attr-';
 var REAL_BASE = %__HZP_REAL_BASE__%;
 var REAL_ORIGIN = %__HZP_REAL_ORIGIN__%;
 var PROXY_ORIGIN = self.__hzpOriginOverride || self.location.origin;
-var SJ_PREFIX = '/sj';
+var HZP_VER = '%__HZP_VER__%';
+function verUrl(h) {
+  try {
+    if (!HZP_VER) return h;
+    var u = new SN.URL(h);
+    if (!/\\.m?js$/i.test(u.pathname) && !/\\.cjs$/i.test(u.pathname)) return h;
+    if (!u.searchParams || typeof u.searchParams.has !== 'function' || u.searchParams.has('__hzpv')) return h;
+    u.searchParams.set('__hzpv', HZP_VER);
+    return u.href;
+  } catch (e) { return h; }
+}
+function deVerUrl(sv) {
+  try {
+    if (String(sv).indexOf('__hzpv=') === -1) return sv;
+    var u = new SN.URL(sv);
+    if (u.searchParams && typeof u.searchParams.has === 'function' && u.searchParams.has('__hzpv')) {
+      u.searchParams.delete('__hzpv');
+      return u.href;
+    }
+  } catch (e) {}
+  return sv;
+}
 
 var SN = {};
 (function(){
@@ -433,8 +776,39 @@ var SN = {};
   SN.rawPost = S.postMessage;
 })();
 
+function unproxyInput(v) {
+  try {
+    var s = String(v == null ? '' : v);
+    if (!s) return s;
+    if (s.charAt(0) === '/') {
+      var r0 = realFrom(PROXY_ORIGIN + s);
+      if (r0) return r0;
+    }
+    if (s.indexOf(PROXY_ORIGIN) === 0) {
+      var r1 = realFrom(s);
+      if (r1) return r1;
+    }
+    var si = s.indexOf('/proxy/');
+    if (si >= 0) {
+      var cand = s.slice(si);
+      if (cand.indexOf('/proxy/') === 0) {
+        var r2 = realFrom(PROXY_ORIGIN + cand);
+        if (r2) return r2;
+      }
+    }
+    var hi = s.indexOf('/http');
+    if (hi >= 0) {
+      var cand2 = s.slice(hi);
+      if (cand2.indexOf('/http') === 0) {
+        var r3 = realFrom(PROXY_ORIGIN + cand2);
+        if (r3) return r3;
+      }
+    }
+  } catch (e) {}
+  return String(v == null ? '' : v);
+}
 function resolveUrl(v, base) {
-  try { return new SN.URL(String(v), base || REAL_BASE || PROXY_ORIGIN); }
+  try { return new SN.URL(unproxyInput(v), base || REAL_BASE || PROXY_ORIGIN); }
   catch (e) { return null; }
 }
 
@@ -446,22 +820,36 @@ function realFrom(v) {
     try { u = new SN.URL(s, PROXY_ORIGIN); } catch (e) { return null; }
     if (u.origin !== PROXY_ORIGIN) return null;
     var p = u.pathname;
-    if (p.indexOf(SJ_PREFIX + '/proxy/') === 0) p = p.slice(SJ_PREFIX.length);
-    if (p.indexOf('/proxy/') !== 0) return null;
+    if (p.indexOf('/proxy/') !== 0) {
+      var dws = /^\\/(wss?)\\/([a-z0-9.\\-\\[\\]:]+)(\\/.*)?$/.exec(p);
+      if (dws) return dws[1] + '://' + dws[2] + (dws[3] || '') + (u.search || '') + (u.hash || '');
+      if (p.indexOf('/http') === 0) {
+        var dform = p.slice(1);
+        var ddec;
+        try { ddec = decodeURIComponent(dform); } catch (e) { ddec = dform; }
+        ddec = ddec.replace(/^(https?):\\/(?!\\/)/i, '$1://');
+        if (ddec.indexOf('://') !== -1) return deVerUrl(ddec + (u.search || '') + (u.hash || ''));
+      }
+      return null;
+    }
     var rest = p.slice('/proxy/'.length);
     var ws = /^(wss?)\\/([a-z0-9.\\-\\[\\]:]+)(\\/.*)$/.exec(rest);
     if (ws) return ws[1] + '://' + ws[2] + (ws[3] || '') + (u.search || '') + (u.hash || '');
     var decoded;
     try { decoded = decodeURIComponent(rest); } catch (e) { decoded = rest; }
-    if (decoded.indexOf('://') !== -1) return decoded + (u.search || '') + (u.hash || '');
+    if (decoded.indexOf('://') !== -1) return deVerUrl(decoded + (u.search || '') + (u.hash || ''));
     var firstSlash = decoded.indexOf('/');
     if (firstSlash === -1) {
       return 'https://' + decoded + '/' + (u.search || '') + (u.hash || '');
     }
     var host = decoded.slice(0, firstSlash);
     if (!host) return null;
-    return 'https://' + host + decoded.slice(firstSlash) + (u.search || '') + (u.hash || '');
+    return deVerUrl('https://' + host + decoded.slice(firstSlash) + (u.search || '') + (u.hash || ''));
   } catch (e) { return null; }
+}
+function isProxiedPath(p) {
+  p = String(p == null ? '' : p);
+  return p.indexOf('/proxy/') === 0 || p.indexOf('/http://') === 0 || p.indexOf('/https://') === 0 || p.indexOf('/ws/') === 0 || p.indexOf('/wss/') === 0;
 }
 
 function unrewriteLinkHeader(value) {
@@ -479,13 +867,12 @@ function toProxy(v) {
     var s = String(v);
     if (!s) return v;
         if (s.indexOf(PROXY_ORIGIN) === 0) return s;
-    if (s.indexOf('/proxy/') === 0) return s;
-    if (s.indexOf(SJ_PREFIX + '/proxy/') === 0) return s;
+    if (s.indexOf('/proxy/') === 0) return PROXY_ORIGIN + s;
     if (/^(mailto:|tel:|sms:|about:|blob:|data:|javascript:)/i.test(s)) return s;
         if (/^https?:\\/\\//i.test(s)) {
       try {
         var snp = new SN.URL(s).pathname;
-        if (snp.indexOf('/proxy/') === 0 || snp.indexOf(SJ_PREFIX + '/proxy/') === 0) return s;
+        if (isProxiedPath(snp)) return s;
       } catch (e) {}
     }
     var abs = resolveUrl(s);
@@ -495,9 +882,9 @@ function toProxy(v) {
     if (p !== 'http:' && p !== 'https:' && p !== 'ws:' && p !== 'wss:') return s;
     if (abs.origin === PROXY_ORIGIN) return abs.href;
     if (p === 'ws:' || p === 'wss:') {
-      return PROXY_ORIGIN + SJ_PREFIX + '/proxy/' + (p === 'wss:' ? 'wss' : 'ws') + '/' + abs.host + abs.pathname + abs.search;
+      return PROXY_ORIGIN + '/' + (p === 'wss:' ? 'wss' : 'ws') + '/' + abs.host + abs.pathname + abs.search;
     }
-        return PROXY_ORIGIN + SJ_PREFIX + '/proxy/' + abs.href;
+        return PROXY_ORIGIN + '/' + verUrl(abs.href);
   } catch (e) { return v; }
 }
 
@@ -585,16 +972,15 @@ function cssProxyUrl(u) {
   try {
     var s = String(u);
         if (s.indexOf(PROXY_ORIGIN) === 0) return s;
-    if (s.indexOf('/proxy/') === 0) return s;
-    if (s.indexOf(SJ_PREFIX + '/proxy/') === 0) return s;
+    if (s.indexOf('/proxy/') === 0) return PROXY_ORIGIN + s;
     var abs = resolveUrl(s);
     if (!abs) return s;
     var p = abs.protocol;
     if (p === 'data:' || p === 'blob:' || p === 'javascript:' || p === 'about:' || p === 'mailto:') return s;
     if (p !== 'http:' && p !== 'https:') return s;
-    if (abs.origin === PROXY_ORIGIN && (abs.pathname.indexOf('/proxy/') === 0 || abs.pathname.indexOf(SJ_PREFIX + '/proxy/') === 0)) return s;
+    if (abs.origin === PROXY_ORIGIN && isProxiedPath(abs.pathname)) return s;
         if (abs.origin === PROXY_ORIGIN) return abs.href;
-    return PROXY_ORIGIN + SJ_PREFIX + '/proxy/' + abs.href;
+    return PROXY_ORIGIN + '/' + verUrl(abs.href);
   } catch (e) { return s; }
 }
 function rewriteCssStr(css) {
@@ -702,11 +1088,15 @@ LOC_PROPS.forEach(function (p) {
 });
 var PRISTINE_PROTO_METHODS = {};
 (function () {
-  if (!self.Location) return;
   ['assign', 'replace', 'reload', 'toString'].forEach(function (m) {
     try {
-      var f = self.Location.prototype[m];
-      if (typeof f === 'function') PRISTINE_PROTO_METHODS[m] = f;
+      var o = NATIVE_LOC;
+      while (o) {
+        var d = getPd(o, m);
+        if (d && typeof d.value === 'function') { PRISTINE_PROTO_METHODS[m] = d.value; return; }
+        o = SN.Object.getPrototypeOf(o);
+      }
+      if (self.Location && self.Location.prototype && typeof self.Location.prototype[m] === 'function') PRISTINE_PROTO_METHODS[m] = self.Location.prototype[m];
     } catch (e) {}
   });
 })();
@@ -733,14 +1123,93 @@ self.__hzpLoc = function (p) {
 function navigate(rawUrl, replace) {
   try {
     var abs = resolveUrl(rawUrl, currentRealUrl());
-    if (!abs) return;
+    if (!abs) {
+      try {
+        var hs = PRISTINE_LOC.href;
+        if (hs && hs.set) return SN.oreflect.call(hs.set, NATIVE_LOC, [String(rawUrl == null ? '' : rawUrl)]);
+      } catch (e0) {}
+      return;
+    }
     var proxied = toProxy(abs.href);
     var pristineMethod = replace ? PRISTINE_PROTO_METHODS.replace : PRISTINE_PROTO_METHODS.assign;
+    if (typeof pristineMethod !== 'function') {
+      try { pristineMethod = NATIVE_LOC[replace ? 'replace' : 'assign']; } catch (e1) {}
+    }
     if (typeof pristineMethod === 'function') {
       SN.oreflect.call(pristineMethod, NATIVE_LOC, [proxied]);
       fireNav(abs.href);
     }
   } catch (e) {}
+}
+function buildLocObj() {
+  var fake = {};
+  var getReal = function (p) {
+    try {
+      var u = realUrlObj();
+      if (!u) return '';
+      var v = u[p];
+      return v == null ? '' : String(v);
+    } catch (e) { return ''; }
+  };
+  var setProp = function (p, v) {
+    try {
+      if (p === 'hash') {
+        var hs = PRISTINE_LOC.hash;
+        if (hs && hs.set) return SN.oreflect.call(hs.set, NATIVE_LOC, [String(v == null ? '' : v)]);
+      }
+      var u = realUrlObj();
+      if (!u) return;
+      try { u[p] = String(v == null ? '' : v); } catch (e) { return; }
+      navigate(u.href, true);
+    } catch (e) {}
+  };
+  ['protocol', 'hash', 'host', 'hostname', 'origin', 'port', 'pathname', 'search'].forEach(function (p) {
+    var d = { enumerable: true, configurable: true };
+    d.get = function () { return getReal(p); };
+    if (p !== 'origin') d.set = function (v) { setProp(p, v); };
+    def(fake, p, d);
+  });
+  def(fake, 'href', {
+    enumerable: true, configurable: true,
+    get: function () { return getReal('href'); },
+    set: function (v) { try { navigate(String(v == null ? '' : v), false); } catch (e) {} }
+  });
+  fake.assign = function (v) { try { navigate(String(v == null ? '' : v), false); } catch (e) {} };
+  fake.replace = function (v) { try { navigate(String(v == null ? '' : v), true); } catch (e) {} };
+  fake.reload = function () {
+    try {
+      var rm = PRISTINE_PROTO_METHODS.reload;
+      if (typeof rm === 'function') return SN.oreflect.call(rm, NATIVE_LOC, []);
+    } catch (e) {}
+    try { NATIVE_LOC.reload(); } catch (e2) {}
+  };
+  fake.toString = function () { return getReal('href'); };
+  fake.valueOf = function () { return getReal('href'); };
+  try { def(fake, Symbol.toPrimitive, { value: function () { return getReal('href'); }, configurable: true }); } catch (e) {}
+  return fake;
+}
+(function () {
+  try {
+    if (getPd(self, '__hzpLocObj')) return;
+    var locObj = buildLocObj();
+    def(self, '__hzpLocObj', {
+      get: function () { return locObj; },
+      set: function (v) { try { navigate(String(v == null ? '' : v), false); } catch (e) {} },
+      configurable: false, enumerable: false
+    });
+  } catch (e) {}
+})();
+function hardenGlobals() {
+  ['__hzpLoc', '__hzpLocObj', '__hzpPMW', '__hzpClient'].forEach(function (name) {
+    try {
+      var d = getPd(self, name);
+      if (!d || d.configurable === false) return;
+      var nd = { configurable: false, enumerable: false };
+      if (d.get) { nd.get = d.get; try { nd.set = d.set; } catch (e0) {} }
+      else { nd.value = d.value; nd.writable = false; }
+      SN.od(self, name, nd);
+    } catch (e) {}
+  });
 }
 var navHandlers = [];
 function addNavHandler(fn) { try { navHandlers.push(fn); } catch (e) {} }
@@ -814,9 +1283,10 @@ function overlayLocation() {
   }
 }
 
-function hookHistory() {
-  var proto = self.History && self.History.prototype;
-  if (!proto) return;
+function hookHistoryFor(w) {
+  var proto = w && w.History && w.History.prototype;
+  if (!proto || proto.__hzpHist) return;
+  def(proto, '__hzpHist', { value: true, writable: false, configurable: true, enumerable: false });
   ['pushState', 'replaceState'].forEach(function (m) {
     var orig = proto[m];
     if (typeof orig !== 'function') return;
@@ -829,7 +1299,7 @@ function hookHistory() {
             var realOrigin = (function () {
               try { return new SN.URL(REAL_BASE || currentRealUrl()).origin; } catch (e) { return PROXY_ORIGIN; }
             })();
-            if (abs && abs.origin !== realOrigin) return undefined;   
+            if (abs && abs.origin !== realOrigin) return undefined;
             if (abs) url = toProxy(abs.href);
           }
           var args = ([state, title, url]).filter(function (x) { return x !== undefined; });
@@ -843,6 +1313,121 @@ function hookHistory() {
   });
 }
 
+function hookHistory() { hookHistoryFor(self); }
+
+function hookLocationFor(w) {
+  var proto = w && w.Location && w.Location.prototype;
+  if (!proto || proto.__hzpLocP) return;
+  def(proto, '__hzpLocP', { value: true, writable: false, configurable: true, enumerable: false });
+  ['assign', 'replace'].forEach(function (m) {
+    var orig = proto[m];
+    if (typeof orig !== 'function') return;
+    def(proto, m, {
+      value: function (v) {
+        try {
+          var abs = resolveUrl(String(v), currentRealUrl());
+          var proxied = abs ? toProxy(abs.href) : String(v);
+          return SN.oreflect.call(orig, this, proxied);
+        } catch (e) { try { return SN.oreflect.call(orig, this, v); } catch (e2) { return undefined; } }
+      },
+      writable: true, configurable: true
+    });
+  });
+}
+
+var frameWatched = new SN.WeakSet();
+
+function installFrameWindow(w) {
+  try {
+    if (!w || w === self) return;
+    if (w.HZP) return;
+    hookHistoryFor(w);
+    hookLocationFor(w);
+  } catch (e) {}
+}
+
+function attachFrameWatch(f) {
+  try {
+    installFrameWindow(f.contentWindow);
+    if (frameWatched.has(f)) return;
+    frameWatched.add(f);
+    f.addEventListener('load', function () {
+      try { installFrameWindow(f.contentWindow); } catch (e) {}
+    });
+  } catch (e) {}
+}
+
+function hookFrameWindowAccess() {
+  try {
+    var IFP = self.HTMLIFrameElement && self.HTMLIFrameElement.prototype;
+    if (IFP) {
+      var cw = SN.oget(IFP, 'contentWindow');
+      if (cw && cw.get && !IFP.__hzpCW) {
+        def(IFP, '__hzpCW', { value: true, writable: false, configurable: true, enumerable: false });
+        def(IFP, 'contentWindow', {
+          get: function () {
+            var w = cw.get.call(this);
+            try { installFrameWindow(w); } catch (e) {}
+            return w;
+          },
+          configurable: true, enumerable: cw.enumerable !== false
+        });
+      }
+    }
+    var DP = self.Document && self.Document.prototype;
+    if (DP) {
+      var dv = SN.oget(DP, 'defaultView');
+      if (dv && dv.get && !DP.__hzpDV) {
+        def(DP, '__hzpDV', { value: true, writable: false, configurable: true, enumerable: false });
+        def(DP, 'defaultView', {
+          get: function () {
+            var w = dv.get.call(this);
+            try { if (w !== self) installFrameWindow(w); } catch (e) {}
+            return w;
+          },
+          configurable: true, enumerable: dv.enumerable !== false
+        });
+      }
+    }
+  } catch (e) {}
+}
+
+function scanFrames() {
+  try {
+    var c = document.querySelectorAll('iframe, frame');
+    for (var i = 0; i < c.length; i++) attachFrameWatch(c[i]);
+  } catch (e) {}
+  try {
+    var fw = self.frames;
+    for (var j = 0; j < fw.length; j++) installFrameWindow(fw[j]);
+  } catch (e) {}
+}
+
+function hookFrames() {
+  try { hookFrameWindowAccess(); } catch (e) {}
+  try { scanFrames(); } catch (e) {}
+  try {
+    var obs = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        var added = muts[i].addedNodes;
+        for (var j = 0; j < added.length; j++) {
+          var n = added[j];
+          if (!n || n.nodeType !== 1) continue;
+          try {
+            var tag = String(n.tagName || '').toLowerCase();
+            if (tag === 'iframe' || tag === 'frame') attachFrameWatch(n);
+            else if (n.querySelectorAll) {
+              var inner = n.querySelectorAll('iframe, frame');
+              for (var k = 0; k < inner.length; k++) attachFrameWatch(inner[k]);
+            }
+          } catch (e) {}
+        }
+      }
+    });
+    if (document.documentElement) obs.observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+}
+
 var HIDDEN_SCRIPT_SRC = HIDDEN + 'script-source-src';
 
 function hookElementAttrs() {
@@ -850,6 +1435,8 @@ function hookElementAttrs() {
   var E = self.Element.prototype;
     var NAT_GET = E.getAttribute, NAT_SET = E.setAttribute, NAT_HAS = E.hasAttribute,
       NAT_REMOVE = E.removeAttribute, NAT_NAMES = E.getAttributeNames, NAT_SETNS = E.setAttributeNS;
+  SN.rawGetAttr = function (el, name) { try { return SN.oreflect.call(NAT_GET, el, [String(name)]); } catch (e) { return null; } };
+  SN.rawSetAttr = function (el, name, v) { try { SN.oreflect.call(NAT_SET, el, [String(name), String(v)]); return true; } catch (e) { return false; } };
 
   makeProxy('Element.prototype.setAttribute', function (ctx) {
     try {
@@ -863,9 +1450,10 @@ function hookElementAttrs() {
           try { SN.oreflect.call(NAT_SET, ctx.that, [HIDDEN + name, String(value)]); } catch (e) {}
           if (out === null) {
             try { SN.oreflect.call(NAT_REMOVE, ctx.that, [name]); } catch (e) {}
-            ctx.args[0] = HIDDEN + name;
+            ctx.earlyReturn = undefined;
+            return;
           }
-          ctx.args[1] = String(out == null ? '' : out);
+          ctx.args[1] = String(out);
         }
       }
     } catch (e) {}
@@ -1094,6 +1682,109 @@ var ATTR_OBJECT = {
 };
 var STRIP_VALUE_ATTRS = { nonce: 1, integrity: 1, csp: 1, credentialless: 1 };
 
+var HTML_URL_ATTR_RE = /(\\s(?:xlink:href|src|href|poster|action|formaction|data|imagesrcset|srcset)\\s*=\\s*)(?:"([^"]*)"|'([^']*)')/gi;
+var HTML_STYLE_ATTR_RE = /(\\sstyle\\s*=\\s*)(?:"([^"]*)"|'([^']*)')/gi;
+function rewriteHtmlString(html) {
+  try {
+    var s = String(html == null ? '' : html);
+    if (!s || s.indexOf('<') === -1) return s;
+    if (s.indexOf('src=') === -1 && s.indexOf('href=') === -1 && s.indexOf('srcset') === -1 && s.indexOf('url(') === -1) return s;
+    s = s.replace(HTML_URL_ATTR_RE, function (m, pre, dq, sq) {
+      var v = dq != null ? dq : sq;
+      if (!v) return m;
+      var t = v.replace(/\\s+/g, '');
+      if (!t || t.charAt(0) === '#' || /^(javascript|data|blob|about|mailto|tel|sms):/i.test(t)) return m;
+      var name = pre.replace(/[\\s=]/g, '');
+      var proxied;
+      try {
+        if (name.indexOf('srcset') !== -1) proxied = srcsetValue(v);
+        else if (realFrom(v)) proxied = v;
+        else proxied = toProxy(v);
+      } catch (e) { return m; }
+      if (proxied == null || proxied === v) return m;
+      var q = dq != null ? '"' : "'";
+      return pre + q + proxied + q + ' ' + HIDDEN + name + '=' + q + v + q;
+    });
+    if (s.indexOf('url(') !== -1) {
+      s = s.replace(HTML_STYLE_ATTR_RE, function (m, pre, dq, sq) {
+        var v = dq != null ? dq : sq;
+        if (!v || v.indexOf('url(') === -1) return m;
+        var out = rewriteCssStr(v);
+        if (out === v) return m;
+        var q = dq != null ? '"' : "'";
+        return pre + q + out + q + ' ' + HIDDEN + 'style=' + q + v + q;
+      });
+    }
+    return s;
+  } catch (e) { return html; }
+}
+function hookHtmlStrings() {
+  try {
+    if (self.Element) {
+      var ip = getPd(self.Element.prototype, 'innerHTML');
+      if (ip && ip.set) {
+        def(self.Element.prototype, 'innerHTML', {
+          get: ip.get ? function () { try { return ip.get.call(this); } catch (e) { return ''; } } : undefined,
+          set: function (v) { return ip.set.call(this, rewriteHtmlString(v)); },
+          configurable: true,
+          enumerable: ip.enumerable !== false
+        });
+        var op = getPd(self.Element.prototype, 'outerHTML');
+        if (op && op.set) {
+          def(self.Element.prototype, 'outerHTML', {
+            get: op.get ? function () { try { return op.get.call(this); } catch (e) { return ''; } } : undefined,
+            set: function (v) { return op.set.call(this, rewriteHtmlString(v)); },
+            configurable: true,
+            enumerable: op.enumerable !== false
+          });
+        }
+      }
+    }
+  } catch (e) {}
+  try {
+    if (self.ShadowRoot) {
+      var sp = getPd(self.ShadowRoot.prototype, 'innerHTML');
+      if (sp && sp.set) {
+        def(self.ShadowRoot.prototype, 'innerHTML', {
+          get: sp.get ? function () { try { return sp.get.call(this); } catch (e) { return ''; } } : undefined,
+          set: function (v) { return sp.set.call(this, rewriteHtmlString(v)); },
+          configurable: true,
+          enumerable: sp.enumerable !== false
+        });
+      }
+    }
+  } catch (e) {}
+  try {
+    makeProxy('Element.prototype.insertAdjacentHTML', function (ctx) {
+      try { if (ctx.args.length > 1) ctx.args[1] = rewriteHtmlString(ctx.args[1]); } catch (e) {}
+    });
+  } catch (e) {}
+  try {
+    makeProxy('Range.prototype.createContextualFragment', function (ctx) {
+      try { if (ctx.args.length > 0) ctx.args[0] = rewriteHtmlString(ctx.args[0]); } catch (e) {}
+    });
+  } catch (e) {}
+  try {
+    if (self.DOMParser) {
+      makeProxy('DOMParser.prototype.parseFromString', function (ctx) {
+        try {
+          if (ctx.args.length > 1 && /html/i.test(String(ctx.args[1]))) ctx.args[0] = rewriteHtmlString(ctx.args[0]);
+        } catch (e) {}
+      });
+    }
+  } catch (e) {}
+  try {
+    makeProxy('Audio', function (ctx) {
+      try {
+        if (ctx.args.length > 0 && ctx.args[0]) {
+          var s = String(ctx.args[0]);
+          if (!realFrom(s)) ctx.args[0] = toProxy(s);
+        }
+      } catch (e) {}
+    });
+  } catch (e) {}
+}
+
 function hookUrlProperties() {
   Object.keys(ATTR_OBJECT).forEach(function (attr) {
     ATTR_OBJECT[attr].forEach(function (className) {
@@ -1125,7 +1816,7 @@ function hookUrlProperties() {
             var s = String(v == null ? '' : v);
             var out;
             if (isSrcset) out = srcsetValue(s);
-            else if (attr === 'srcdoc') out = toProxy(s);
+            else if (attr === 'srcdoc') out = rewriteHtmlString(s);
             else out = (realFrom(s) ? s : toProxy(s));
             return desc.set.call(this, out == null ? '' : out);
           } catch (e) { try { return desc.set.call(this, v); } catch (e2) {} }
@@ -1284,10 +1975,21 @@ function hookDocumentWrite() {
   } catch (e) {}
 }
 function wrapMessageData(data) {
+  try {
+    if (data && typeof data === 'object' && data.$hzp$messagetype === 'window') return data;
+  } catch (e0) {}
   var u = null;
   try { u = realUrlObj(); } catch (e) {}
   var origin = (u && u.origin) || REAL_ORIGIN || PROXY_ORIGIN;
   return { $hzp$messagetype: 'window', $hzp$origin: String(origin), $hzp$data: data };
+}
+function isWinLike(o) {
+  if (!o) return false;
+  try { if (o === self || o === self.window) return true; } catch (e0) {}
+  try { if (typeof o.postMessage !== 'function') return false; } catch (e1) { return false; }
+  try { if (o.self === o) return true; } catch (e2) {}
+  try { if (o.location !== undefined) return true; } catch (e3) { return true; }
+  return false;
 }
 function hookPostMessage() {
   try {
@@ -1305,8 +2007,23 @@ function hookPostMessage() {
     self.__hzpPMW = function (w) {
       return {
         postMessage: function (a, b, c) {
-          try { return SN.oreflect.call(self.postMessage, w, [a, b, c]); }
-          catch (e) { try { return SN.oreflect.call(SN.rawPost, w, [a, b, c]); } catch (e2) { return undefined; } }
+          if (!w) return undefined;
+          var isWin = false;
+          try { isWin = isWinLike(w); } catch (e0) { isWin = false; }
+          if (!isWin) {
+            try { return w.postMessage(a, b, c); } catch (e3) { return undefined; }
+          }
+          var payload = a;
+          try { payload = wrapMessageData(a); } catch (e4) {}
+          if (w === self || w === self.window) {
+            try { return SN.oreflect.call(SN.rawPost, self, [payload, '*', c]); } catch (e5) {}
+            try { return self.postMessage(payload, '*', c); } catch (e6) {}
+            return undefined;
+          }
+          try { return SN.oreflect.call(SN.rawPost, w, [payload, '*', c]); } catch (e7) {}
+          try { return SN.oreflect.call(self.postMessage, w, [payload, '*', c]); } catch (e8) {}
+          try { return w.postMessage(payload, '*', c); } catch (e9) {}
+          return undefined;
         }
       };
     };
@@ -1332,6 +2049,55 @@ function hookPostMessage() {
             if (d && typeof d === 'object' && d.$hzp$messagetype === 'window' && typeof d.$hzp$origin === 'string') return d.$hzp$origin;
           } catch (e) {}
           return c.get();
+        }
+      });
+    }
+  } catch (e) {}
+}
+function hookUserAgent() {
+  var ua = '';
+  try { ua = String((self.navigator && self.navigator.userAgent) || ''); } catch (e) { return; }
+  if (ua.indexOf('HeadlessChrome') === -1) return;
+  var uaFixed = ua.replace(/HeadlessChrome\\/(\\d+)[\\d.]*/, 'Chrome/$1.0.0.0');
+  try {
+    makeTrap('Navigator.prototype.userAgent', {
+      get: function (c) { try { return uaFixed; } catch (e) {} return c.get(); }
+    });
+  } catch (e) {}
+  try {
+    var uad = self.navigator && self.navigator.userAgentData;
+    if (uad) {
+      var fixBrands = function (list) {
+        if (!list || typeof list.length !== 'number') return list;
+        var out = [];
+        for (var i = 0; i < list.length; i++) {
+          var b = list[i] || {};
+          out.push(b.brand === 'HeadlessChrome' ? { brand: 'Google Chrome', version: String(b.version || '') } : b);
+        }
+        return out;
+      };
+      makeTrap('Navigator.prototype.userAgentData', {
+        get: function (c) {
+          var real = null;
+          try { real = c.get(); } catch (e) {}
+          if (!real) return real;
+          var brands = fixBrands(real.brands);
+          return {
+            brands: brands,
+            mobile: real.mobile,
+            platform: real.platform,
+            getHighEntropyValues: function (hints) {
+              var pr = real.getHighEntropyValues(hints);
+              return pr && pr.then ? pr.then(function (v) {
+                try {
+                  if (v && v.brands) v.brands = fixBrands(v.brands);
+                  if (v && v.fullVersionList) v.fullVersionList = fixBrands(v.fullVersionList);
+                } catch (e) {}
+                return v;
+              }) : pr;
+            },
+            toJSON: function () { return { brands: brands, mobile: real.mobile, platform: real.platform }; }
+          };
         }
       });
     }
@@ -1910,6 +2676,7 @@ function hookDomEvents() {
     self.addEventListener('popstate', function () { try { reportUrlSoon(); } catch (e) {} });
     doc.addEventListener('click', function (e) {
       try {
+        if (e.defaultPrevented) return;
         var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
         if (!a) return;
         var h = a.getAttribute('href') || '';
@@ -1921,19 +2688,21 @@ function hookDomEvents() {
         if (tgt && tgt !== '_self') { self.open(dest, tgt, 'noopener,noreferrer'); }
         else { self.location.assign(dest); }
       } catch (err) {}
-    }, true);
+    }, false);
     doc.addEventListener('submit', function (e) {
       try {
+        if (e.defaultPrevented) return;
         var f = e.target;
         if (!f || !f.action) return;
+        var abs = String(f.action || '');
+        if (abs.indexOf(PROXY_ORIGIN) === 0) return;
         e.preventDefault();
         var a = f.getAttribute('action') || '';
-        var proxied = toProxy(a);
         f.setAttribute(HIDDEN + 'action', a);
-        f.setAttribute('action', proxied);
+        f.setAttribute('action', toProxy(a));
         f.submit();
       } catch (err) {}
-    }, true);
+    }, false);
   } catch (e) {}
 }
 
@@ -1960,6 +2729,13 @@ function rewriteOneElement(el) {
         if (!shouldProxyRef(raw)) return;
         var proxied = toProxy(raw);
         if (proxied === raw) return;
+        if (SN.rawGetAttr) {
+          var cur = SN.rawGetAttr(el, attr);
+          if (cur === proxied) {
+            if (SN.rawGetAttr(el, HIDDEN + attr) !== raw && SN.rawSetAttr) SN.rawSetAttr(el, HIDDEN + attr, raw);
+            return;
+          }
+        }
         el.setAttribute(HIDDEN + attr, raw);
         el.setAttribute(attr, proxied);
       });
@@ -1969,7 +2745,13 @@ function rewriteOneElement(el) {
         var ss = el.getAttribute('srcset');
         if (ss) {
           var proxied2 = srcsetValue(ss);
-          if (proxied2 !== ss) { el.setAttribute(HIDDEN + 'srcset', ss); el.setAttribute('srcset', proxied2); }
+          if (proxied2 !== ss) {
+            var cur2 = SN.rawGetAttr ? SN.rawGetAttr(el, 'srcset') : null;
+            if (cur2 !== proxied2) {
+              if (SN.rawSetAttr) SN.rawSetAttr(el, HIDDEN + 'srcset', ss); else el.setAttribute(HIDDEN + 'srcset', ss);
+              el.setAttribute('srcset', proxied2);
+            }
+          }
         }
       } catch (e) {}
     }
@@ -1978,7 +2760,13 @@ function rewriteOneElement(el) {
         var iss = el.getAttribute('imagesrcset');
         if (iss) {
           var proxied3 = srcsetValue(iss);
-          if (proxied3 !== iss) { el.setAttribute(HIDDEN + 'imagesrcset', iss); el.setAttribute('imagesrcset', proxied3); }
+          if (proxied3 !== iss) {
+            var cur3 = SN.rawGetAttr ? SN.rawGetAttr(el, 'imagesrcset') : null;
+            if (cur3 !== proxied3) {
+              if (SN.rawSetAttr) SN.rawSetAttr(el, HIDDEN + 'imagesrcset', iss); else el.setAttribute(HIDDEN + 'imagesrcset', iss);
+              el.setAttribute('imagesrcset', proxied3);
+            }
+          }
         }
       } catch (e) {}
     }
@@ -2139,18 +2927,22 @@ function installAllWindows() {
   try { hookHistory(); } catch (e) {}
   try { hookElementAttrs(); } catch (e) {}
   try { hookUrlProperties(); } catch (e) {}
+  try { hookHtmlStrings(); } catch (e) {}
   try { hookDocument(); } catch (e) {}
   try { hookDocumentWrite(); } catch (e) {}
   try { hookPostMessage(); } catch (e) {}
+  try { hookUserAgent(); } catch (e) {}
   try { hookCookies(); } catch (e) {}
   try { isolateStorages(); } catch (e) {}
   try { hookCss(); } catch (e) {}
   try { hookRequests(); } catch (e) {}
   try { hookWindow(); } catch (e) {}
   try { hookDomEvents(); } catch (e) {}
+  try { hookFrames(); } catch (e) {}
   try { bootObserver(); } catch (e) {}
   try { styleElementWatcher(); } catch (e) {}
   try { bootUrlSync(); } catch (e) {}
+  try { hardenGlobals(); } catch (e) {}
 }
 
 installAllWindows();
@@ -2162,6 +2954,7 @@ function buildClientScript(realBase, realOrigin) {
   return '<script>' + HZP_CLIENT_SRC
     .replace('%__HZP_REAL_BASE__%', jsonSafeScript(realBase))
     .replace('%__HZP_REAL_ORIGIN__%', jsonSafeScript(realOrigin))
+    .replace('%__HZP_VER__%', String(HZP.CLIENT_VERSION).replace(/[^0-9A-Za-z._-]/g, ''))
     + '<' + '/script>';
 }
 function jsonSafeScript(v) {
@@ -2176,14 +2969,14 @@ function attrProxyUrl(v, realBase, proxyOrigin) {
         if (/^https?:\/\//i.test(v)) {
       try {
         var ap = new URL(v).pathname;
-        if (ap.indexOf('/proxy/') === 0 || ap.indexOf(SJ_PREFIX + '/proxy/') === 0) return v;
+        if (isProxiedPath(ap)) return v;
       } catch (e) {}
     }
     var abs = new URL(v, realBase);
     var p = abs.protocol;
     if (p !== 'http:' && p !== 'https:') return v;
-    if (abs.pathname.indexOf('/proxy/') === 0 || abs.pathname.indexOf(SJ_PREFIX + '/proxy/') === 0) return v;
-    return proxyOrigin + SJ_PREFIX + '/proxy/' + abs.href;
+    if (isProxiedPath(abs.pathname)) return v;
+    return proxyOrigin + '/' + verHref(abs.href);
   } catch (e) { return v; }
 }
 function srcSetProxy(value, realBase, proxyOrigin) {
@@ -2197,7 +2990,7 @@ function srcSetProxy(value, realBase, proxyOrigin) {
 }
 
 var HR_URL_RULES = [
-  ['a[href]', 'href'], ['area[href]', 'href'], ['image[href]', 'href'],
+  ['a[href]', 'href'], ['area[href]', 'href'], ['link[href]', 'href'], ['image[href]', 'href'],
   ['use[href]', 'href'], ['textPath[href]', 'href'], ['mpath[href]', 'href'],
   ['feImage[href]', 'href'], ['animate[href]', 'href'], ['animateMotion[href]', 'href'],
   ['animateTransform[href]', 'href'], ['set[href]', 'href'], ['discard[href]', 'href'],
@@ -2239,6 +3032,12 @@ function buildHtmlRewriter(realBase, proxyOrigin) {
       var c = el.getAttribute('content') || '';
       var v = rewriteMetaRefresh(c, realBase, proxyOrigin);
       if (v) el.setAttribute('content', v);
+    } catch (e) {}
+  } });
+    r.on('meta[http-equiv]', { element: function (el) {
+    try {
+      var hv = String(el.getAttribute('http-equiv') || '').toLowerCase();
+      if (hv === 'content-security-policy' || hv === 'content-security-policy-report-only' || hv === 'x-content-security-policy' || hv === 'x-webkit-csp') el.remove();
     } catch (e) {}
   } });
     r.on('a[target]', { element: function (el) {
@@ -2320,27 +3119,71 @@ async function handleRequest(request, env, ctx, pathOverride) {
 
   var targetURL = parseUniversalURL(pathname, url.search, url.hash);
   if (!targetURL) return new Response('Invalid URL', { status: 400 });
+  if (targetURL.indexOf('__hzpv=') !== -1) {
+    try {
+      var tu = new URL(targetURL);
+      if (tu.searchParams.has('__hzpv')) { tu.searchParams.delete('__hzpv'); targetURL = tu.href; }
+    } catch (e) {}
+  }
+  var wrappedFix = normalizeWrappedUrl(targetURL);
+  if (wrappedFix) return Response.redirect(new URL('/' + wrappedFix, url.origin).href, 302);
   var targetURLObject;
   try { targetURLObject = new URL(targetURL); }
   catch (e) { return new Response('Invalid URL', { status: 400 }); }
-  if (isAdRequest(targetURL)) return new Response(null, { status: 204 });
+  var navDest = String(request.headers.get('sec-fetch-dest') || '').toLowerCase();
+  if (navDest === 'document' || navDest === 'iframe') {
+    var navHost = '';
+    try { navHost = String(targetURLObject.hostname || '').toLowerCase(); } catch (e) {}
+    if (navHost && isAdNavHost(navHost)) return new Response(null, { status: 204 });
+  } else if (isAdRequest(targetURL)) return new Response(null, { status: 204 });
 
   var fwdHeaders = new Headers(request.headers);
-  fwdHeaders.set('User-Agent', HZP.UA);
+  var uaRaw = fwdHeaders.get('User-Agent');
+  if (!uaRaw || uaRaw.indexOf('Mozilla/5.0') === -1) {
+    fwdHeaders.set('User-Agent', HZP.UA);
+  } else if (uaRaw.indexOf('HeadlessChrome') !== -1) {
+    fwdHeaders.set('User-Agent', uaRaw.replace(/HeadlessChrome\/(\d+)[\d.]*/, 'Chrome/$1.0.0.0'));
+  }
+  var deHeadless = function (h, brand) {
+    if (!h || h.indexOf('HeadlessChrome') === -1) return h;
+    return h.replace(/HeadlessChrome/g, brand);
+  };
+  var chUa = fwdHeaders.get('sec-ch-ua');
+  if (chUa) fwdHeaders.set('sec-ch-ua', deHeadless(chUa, 'Google Chrome'));
+  var chUaFull = fwdHeaders.get('sec-ch-ua-full-version-list');
+  if (chUaFull) fwdHeaders.set('sec-ch-ua-full-version-list', deHeadless(chUaFull, 'Google Chrome'));
   ['Host', 'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-worker',
-   'x-forwarded-proto', 'x-forwarded-for', 'x-forwarded-host', 'x-real-ip',
-   'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest', 'sec-fetch-user'].forEach(function (n) { fwdHeaders.delete(n); });
+   'x-forwarded-proto', 'x-forwarded-for', 'x-forwarded-host', 'x-real-ip'].forEach(function (n) { fwdHeaders.delete(n); });
 
   var refRaw = fwdHeaders.get('Referer');
   var refReal = null;
   if (refRaw) {
     try {
       var refU = new URL(refRaw);
-      if (refU.origin === url.origin) refReal = parseProxiedPath(refU.pathname, refU.search, refU.hash);
+      if (refU.origin === url.origin) refReal = parseUniversalURL(refU.pathname, refU.search, refU.hash);
     } catch (e) { refReal = null; }
     if (refReal) fwdHeaders.set('Referer', refReal);
     else fwdHeaders.delete('Referer');
   }
+
+  try {
+    if (request.headers.has('sec-fetch-dest')) {
+      var tgtOrigin = targetURLObject.origin;
+      var initOrigin = null;
+      if (refReal) { try { initOrigin = new URL(refReal).origin; } catch (e) { initOrigin = null; } }
+      var siteKey = function (origin) {
+        var h = new URL(origin).hostname;
+        var parts = h.split('.');
+        return parts.length > 2 ? parts.slice(-2).join('.') : h;
+      };
+      var sfSite;
+      if (!initOrigin) sfSite = request.headers.get('sec-fetch-dest') === 'document' ? 'none' : 'cross-site';
+      else if (initOrigin === tgtOrigin) sfSite = 'same-origin';
+      else if (siteKey(initOrigin) === siteKey(tgtOrigin)) sfSite = 'same-site';
+      else sfSite = 'cross-site';
+      fwdHeaders.set('sec-fetch-site', sfSite);
+    }
+  } catch (e) {}
   var originRaw = fwdHeaders.get('Origin');
   if (originRaw) {
     var originReal = null;
@@ -2350,7 +3193,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
       } else {
         var oU = new URL(originRaw);
         if (oU.origin === url.origin) {
-          var oTarget = parseProxiedPath(oU.pathname, oU.search, oU.hash);
+          var oTarget = parseUniversalURL(oU.pathname, oU.search, oU.hash);
           if (oTarget) originReal = new URL(oTarget).origin;
         } else {
           originReal = oU.origin;
@@ -2403,6 +3246,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
       outHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
       outHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
     }
+    outHeaders.set('Cross-Origin-Resource-Policy', 'cross-origin');
     outHeaders.delete('Content-Length');
     outHeaders.delete('Content-Encoding');
     outHeaders.delete('Transfer-Encoding');
@@ -2417,17 +3261,53 @@ async function handleRequest(request, env, ctx, pathOverride) {
     return transformed;
   }
 
+  if (isCssContentType(contentType)) {
+    var cssH = passThroughHeaders(resp, host, url.origin);
+    try {
+      var css = await resp.text();
+      css = rewriteCssUrls(css, resp.url || targetURL, url.origin);
+      cssH.set('Content-Type', contentType);
+      cssH.set('Cache-Control', 'public, max-age=86400');
+      return new Response(css, { status: resp.status, statusText: resp.statusText, headers: cssH });
+    } catch (e) {
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: cssH });
+    }
+  }
+
     if (isJsContentType(contentType)) {
     var passH = passThroughHeaders(resp, host, url.origin);
     try {
       var js = await resp.text();
       try { js = rewriteJsSource(js, new URL(resp.url).href, url.origin); }
       catch (e) { js = rewriteJsSource(js, resp.url, url.origin); }
-      if (js.indexOf('__hzpLoc(') !== -1 || js.indexOf('__hzpPMW(') !== -1) js = REWRITE_GUARD + js;
+      if (js.indexOf('__hzpLoc(') !== -1 || js.indexOf('__hzpLocObj') !== -1 || js.indexOf('__hzpPMW(') !== -1) js = REWRITE_GUARD + js;
       passH.set('Cache-Control', 'public, max-age=86400');
       return new Response(js, { status: resp.status, statusText: resp.statusText, headers: passH });
     } catch (e) {
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: passH });
+    }
+  }
+
+    if (contentType.indexOf('manifest') !== -1 || /\b(?:web)?manifest\.json(?:$|[?#])/i.test(targetURL) || /\.webmanifest(?:$|[?#])/i.test(targetURL)) {
+    var manH = passThroughHeaders(resp, host, url.origin);
+    try {
+      var mtxt = await resp.text();
+      var mj = JSON.parse(mtxt);
+      var mbase = resp.url || targetURL;
+      var rwU = function (v) { try { return cssProxyUrl(String(v), mbase, url.origin); } catch (e) { return v; } };
+      ['start_url', 'scope', 'id'].forEach(function (k) { if (typeof mj[k] === 'string') mj[k] = rwU(mj[k]); });
+      if (Array.isArray(mj.icons)) mj.icons.forEach(function (ic) { if (ic && typeof ic.src === 'string') ic.src = rwU(ic.src); });
+      if (Array.isArray(mj.screenshots)) mj.screenshots.forEach(function (ic) { if (ic && typeof ic.src === 'string') ic.src = rwU(ic.src); });
+      if (Array.isArray(mj.shortcuts)) mj.shortcuts.forEach(function (sc) {
+        if (!sc) return;
+        if (typeof sc.url === 'string') sc.url = rwU(sc.url);
+        if (Array.isArray(sc.icons)) sc.icons.forEach(function (ic) { if (ic && typeof ic.src === 'string') ic.src = rwU(ic.src); });
+      });
+      if (mj.share_target && typeof mj.share_target.action === 'string') mj.share_target.action = rwU(mj.share_target.action);
+      manH.set('Content-Type', contentType.indexOf('manifest') !== -1 ? contentType : 'application/manifest+json');
+      return new Response(JSON.stringify(mj), { status: resp.status, statusText: resp.statusText, headers: manH });
+    } catch (e) {
+      return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: manH });
     }
   }
 
@@ -2462,6 +3342,14 @@ function passThroughHeaders(resp, host, proxyOrigin) {
   var h = new Headers(resp.headers);
   h.set('Access-Control-Allow-Origin', '*');
   stripSecurityHeaders(h);
+  h.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  if (HZP.CROSS_ORIGIN_ISOLATION) {
+    h.set('Cross-Origin-Embedder-Policy', 'require-corp');
+    h.set('Cross-Origin-Opener-Policy', 'same-origin');
+  }
+  h.delete('Content-Length');
+  h.delete('Content-Encoding');
+  h.delete('Transfer-Encoding');
   if (HZP.COOKIE_ISOLATION) rewriteSetCookieOnHeaders(resp, h, host);
   rewriteResponseUrlHeaders(h, resp.url, proxyOrigin);
   return h;
@@ -2489,623 +3377,15 @@ function handleWebSocketProxy(request, targetURL) {
 }
 
 
-var HZP_OLD = (function () {
-var _p = ['sr'+'iail', 'wor'+'kers', 'd'+'ev', 'goog'+'le-cla'+'ssroom'];
-var CLOUDMOON_PROXY = 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
-var AD_PATTERNS = [
-  'googlesyndication.com', 'doubleclick.net', 'googleadservices.com',
-  'google-analytics.com', 'googletagmanager.com', 'googletagservices.com',
-  'adservice.google.com', 'pagead2.googlesyndication.com',
-  'tpc.googlesyndication.com', 'video-ad-stats.googlesyndication.com',
-  'ads.google.com', 'adssettings.google.com', 'static.ads-twitter.com',
-  'ads-api.twitter.com', 'ads.facebook.com', 'an.facebook.com',
-  'adnxs.com', 'advertising.com', 'outbrain.com', 'taboola.com',
-  'criteo.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net',
-  'adsafeprotected.com', 'moatads.com', 'scorecardresearch.com',
-  '/ads/', '/ad/', '/advert/', '/advertisement/', '/adsense/',
-  '/adserver/', '/analytics/', 'prebid', 'advertis', 'banner', 'popup'
-];
-function isAdRequest(u) {
-  u = (u || '').toLowerCase();
-  for (var i = 0; i < AD_PATTERNS.length; i++) { if (u.indexOf(AD_PATTERNS[i]) !== -1) return true; }
-  return false;
-}
-function isCloudMoonPath(pathname) {
-  var _d = ['app', 'com'], _n = 'cloudmoon', _w = 'web';
-  var full = _w + '.' + _n + _d[0] + '.' + _d[1];
-  var short = _n + _d[0] + '.' + _d[1];
-  if (pathname === '/' + full || pathname.indexOf('/' + full + '/') === 0) return true;
-  if (pathname === '/' + short || pathname.indexOf('/' + short + '/') === 0) return true;
-  return false;
-}
-var B54_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567';
-var B54_BASE = 54;
-function caesarEncode(str) {
-  var out = '';
-  for (var i = 0; i < str.length; i++) out += String.fromCharCode(str.charCodeAt(i) + 1);
-  return out;
-}
-function b54encode(str) {
-  var bytes = [];
-  for (var i = 0; i < str.length; i++) {
-    var c = str.charCodeAt(i);
-    if (c < 128) bytes.push(c);
-    else if (c < 2048) { bytes.push(192 | (c >> 6)); bytes.push(128 | (c & 63)); }
-    else { bytes.push(224 | (c >> 12)); bytes.push(128 | ((c >> 6) & 63)); bytes.push(128 | (c & 63)); }
-  }
-  var result = '';
-  var i = 0;
-  while (i < bytes.length) {
-    var b1 = bytes[i++] || 0, b2 = bytes[i++] || 0, b3 = bytes[i++] || 0;
-    var n = (b1 << 16) | (b2 << 8) | b3;
-    var chars = [], val = n;
-    do { chars.push(B54_ALPHABET[val % B54_BASE]); val = Math.floor(val / B54_BASE); } while (val > 0 && chars.length < 5);
-    while (chars.length < 5) chars.push(B54_ALPHABET[0]);
-    result += chars.reverse().join('');
-  }
-  return result;
-}
-function encodeUrl(url) { return b54encode(caesarEncode(url)); }
-function stripSecurityHeaders(h) {
-  h.delete('Content-Security-Policy');
-  h.delete('Content-Security-Policy-Report-Only');
-  h.delete('X-Frame-Options');
-  h.delete('Frame-Options');
-  h.delete('X-Content-Type-Options');
-  h.delete('Strict-Transport-Security');
-  h.delete('Cross-Origin-Embedder-Policy');
-  h.delete('Cross-Origin-Opener-Policy');
-  h.delete('Cross-Origin-Resource-Policy');
-  h.delete('Permissions-Policy');
-}
-function injectInHead(html, content) {
-  var m = html.match(/<head[^>]*>/i);
-  if (m) return html.replace(m[0], m[0] + content);
-  if (html.indexOf('</head>') !== -1) return html.replace('</head>', content + '</head>');
-  return content + html;
-}
-class SrcAttrRewriter {
-  constructor(baseURL, workerOrigin, attr) {
-    this.baseURL = baseURL;
-    this.workerOrigin = workerOrigin;
-    this.attr = attr;
-  }
-  element(el) {
-    var src = el.getAttribute(this.attr);
-    if (!src) return;
-    var abs;
-    try { abs = new URL(src, this.baseURL); } catch(e) { return; }
-    if (abs.protocol === 'data:' || abs.protocol === 'blob:') return;
-    el.setAttribute(this.attr, this.workerOrigin + '/proxy/' + abs.host + abs.pathname + abs.search);
-  }
-}
-function rewriteIframesAndAssets(html, baseURL, workerOrigin) {
-  var rewriter = new HTMLRewriter()
-    .on('iframe[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
-    .on('script[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
-    .on('img[src]', new SrcAttrRewriter(baseURL, workerOrigin, 'src'))
-    .on('link[href]', new SrcAttrRewriter(baseURL, workerOrigin, 'href'));
-  return rewriter.transform(new Response(html)).text();
-}
-function blockAdsInHTML(html) {
-  html = html.replace(/<script[^>]*googlesyndication[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*adsbygoogle[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*google-analytics[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*googletagmanager[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<script[^>]*doubleclick[^>]*>[\s\S]*?<\/script>/gi, '');
-  html = html.replace(/<iframe[^>]*googlesyndication[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<iframe[^>]*doubleclick[^>]*>[\s\S]*?<\/iframe>/gi, '');
-  html = html.replace(/<ins[^>]*adsbygoogle[^>]*>[\s\S]*?<\/ins>/gi, '');
-  html = html.replace(/<div[^>]*id="google_ads[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
-  return html;
-}
-var AD_BLOCKER = '<style>.a-div-horizontal,.a-div-vertical,.a-div-placeholder,.a-div-box,ins.adsbygoogle,[data-ad-slot],[data-ad-client],iframe[src*="googlesyndication"],iframe[src*="doubleclick"]{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;position:absolute!important;width:0!important;height:0!important;overflow:hidden!important}</style><script>(function(){function r(){var s=["ins.adsbygoogle","[data-ad-slot]","[data-ad-client]","iframe[src*=googlesyndication]","iframe[src*=doubleclick]",".a-div-horizontal",".a-div-vertical",".a-div-placeholder",".a-div-box"];s.forEach(function(s){document.querySelectorAll(s).forEach(function(e){e.style.display="none";try{e.remove()}catch(_){}})})}r();document.readyState==="loading"&&document.addEventListener("DOMContentLoaded",r);window.addEventListener("load",r);setInterval(r,500);if(document.body)new MutationObserver(function(){r()}).observe(document.body,{childList:true,subtree:true})})();</script>';
-var SANDBOX_SCRIPT = '<script>(function(){' +
-  'var SELF_ORIGIN=self.location.origin;' +
-  'var RUN_HEAVY=true;' +
-  'try{' +
-    'if(window.self!==window.parent){' +
-      'RUN_HEAVY=(window.parent.location.origin!==SELF_ORIGIN);' +
-    '}' +
-  '}catch(e){' +
-    'RUN_HEAVY=true;' +
-  '}' +
-  'var REAL_BASE="__REAL_BASE__";' +
-  'var REAL_ORIGIN="__REAL_ORIGIN__";' +
-  'function toProxy(u){' +
-    'try{' +
-      'if(!u)return u;' +
-      'if(/^(about|blob|data|javascript|mailto|tel):/i.test(u))return u;' +
-      'var abs=new URL(u,REAL_BASE||document.baseURI);' +
-      'if(abs.protocol!=="http:"&&abs.protocol!=="https:")return u;' +
-      'return SELF_ORIGIN+"/proxy/"+abs.host+abs.pathname+abs.search;' +
-    '}catch(e){return u;}' +
-  '}' +
-  'window.addEventListener("error",function(e){' +
-    'if(e.error&&e.error.name==="SecurityError"&&/replaceState|pushState/.test(e.message||"")){' +
-      'e.preventDefault();' +
-      'e.stopImmediatePropagation();' +
-      'return true;' +
-    '}' +
-  '},true);' +
-  'var subscribedOrigins=new Set();' +
-  'window.addEventListener("message",function(e){' +
-    'if(e.data&&e.data.type==="hzp-subscribe"){' +
-      'subscribedOrigins.add(e.origin);' +
-      'try{e.source.postMessage({type:"hzp-subscribed"},e.origin);}catch(_){}' +
-    '}' +
-  '});' +
-  'function reportUrl(){' +
-    'try{' +
-      'if(window.parent&&window.parent!==window.self){' +
-        'var parentOrigin;' +
-        'try{' +
-          'parentOrigin=window.parent.location.origin;' +
-        '}catch(e){' +
-          'parentOrigin=null;' +
-        '}' +
-        'if(parentOrigin===SELF_ORIGIN){' +
-          'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},parentOrigin);' +
-        '}else if(subscribedOrigins.size){' +
-          'subscribedOrigins.forEach(function(origin){' +
-            'window.parent.postMessage({type:"hzp-urlchange",url:self.location.href},origin);' +
-          '});' +
-        '}' +
-      '}' +
-    '}catch(e){}' +
-  '}' +
-  'reportUrl();' +
-  'setInterval(reportUrl,500);' +
-  'try{' +
-    'var _fetch=window.fetch;' +
-    'window.fetch=function(input,init){' +
-      'var url=(typeof input==="string")?input:(input&&input.url);' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(SELF_ORIGIN)!==0){' +
-        'var proxied=toProxy(url);' +
-        'if(typeof input==="string"){input=proxied;}' +
-        'else{input=new Request(proxied,input);}' +
-      '}' +
-      'return _fetch.call(window,input,init);' +
-    '};' +
-  '}catch(e){}' +
-  'try{' +
-    'var _xopen=XMLHttpRequest.prototype.open;' +
-    'XMLHttpRequest.prototype.open=function(method,url){' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(SELF_ORIGIN)!==0){' +
-        'url=toProxy(url);' +
-      '}' +
-      'var args=[method,url];' +
-      'for(var i=2;i<arguments.length;i++)args.push(arguments[i]);' +
-      'return _xopen.apply(this,args);' +
-    '};' +
-  '}catch(e){}' +
-  'try{' +
-    'var _beacon=navigator.sendBeacon;' +
-    'navigator.sendBeacon=function(url,data){' +
-      'if(url&&/^https?:\\/\\//i.test(url)&&url.indexOf(SELF_ORIGIN)!==0){' +
-        'url=toProxy(url);' +
-      '}' +
-      'return _beacon.call(navigator,url,data);' +
-    '};' +
-  '}catch(e){}' +
-  'try{' +
-    'if(navigator.serviceWorker){' +
-      'navigator.serviceWorker.register=function(){' +
-        'return Promise.reject(new Error("ServiceWorker registration blocked by sandbox"));' +
-      '};' +
-      'navigator.serviceWorker.getRegistrations&&navigator.serviceWorker.getRegistrations().then(function(regs){' +
-        'regs.forEach(function(r){r.unregister();});' +
-      '});' +
-    '}' +
-  '}catch(e){}' +
-  'var lastGesture=0;' +
-  'document.addEventListener("pointerdown",function(){lastGesture=Date.now();},true);' +
-  'try{' +
-    'var _open=window.open;' +
-    'window.open=function(u,n,s){' +
-      'if(Date.now()-lastGesture>1000){return null;}' +
-      'return _open.call(window,u?toProxy(u):u,n,s);' +
-    '};' +
-  '}catch(e){}' +
-  'document.addEventListener("click",function(e){' +
-    'var a=e.target&&e.target.closest?e.target.closest("a[href]"):null;' +
-    'if(!a)return;var h=a.getAttribute("href")||"";' +
-    'if(!h||h.charAt(0)==="#"||/^(javascript|mailto|tel):/i.test(h))return;' +
-    'e.preventDefault();' +
-    'var dest=toProxy(h);' +
-    'var tgt=a.getAttribute("target");' +
-    'if(tgt&&tgt!=="_self"){window.open(dest,"_blank","noopener,noreferrer");}' +
-    'else{window.location.href=dest;}' +
-  '},true);' +
-  'document.addEventListener("submit",function(e){' +
-    'var f=e.target;if(!f||!f.action)return;' +
-    'if(/^https?:\\/\\//i.test(f.action)&&f.action.indexOf(SELF_ORIGIN)!==0){' +
-      'e.preventDefault();f.action=toProxy(f.action);f.submit();' +
-    '}' +
-  '},true);' +
-  'if(RUN_HEAVY){' +
-    'try{' +
-      'if(window.top!==window.self){' +
-        'Object.defineProperty(window,"top",{get:function(){return window.self;}});' +
-        'Object.defineProperty(window,"parent",{get:function(){return window.self;}});' +
-      '}' +
-    '}catch(e){}' +
-    'try{' +
-      'var _assign=Location.prototype.assign,_replace=Location.prototype.replace;' +
-      'Location.prototype.assign=function(u){return _assign.call(this,toProxy(u));};' +
-      'Location.prototype.replace=function(u){return _replace.call(this,toProxy(u));};' +
-    '}catch(e){}' +
-    'try{' +
-      'var _push=History.prototype.pushState,_rep=History.prototype.replaceState;' +
-      'History.prototype.pushState=function(s,t,u){return _push.call(this,s,t,u?toProxy(u):u);};' +
-      'History.prototype.replaceState=function(s,t,u){return _rep.call(this,s,t,u?toProxy(u):u);};' +
-    '}catch(e){}' +
-    'var lastHref=self.location.href;' +
-    'setInterval(function(){' +
-      'if(self.location.href!==lastHref){' +
-        'var cur=self.location.href;' +
-        'if(cur.indexOf(SELF_ORIGIN)!==0){self.location.href=toProxy(cur);}' +
-        'lastHref=self.location.href;' +
-        'reportUrl();' +
-      '}' +
-    '},150);' +
-    'try{' +
-      'if(window.navigation){' +
-        'navigation.addEventListener("navigate",function(e){' +
-          'var dest=e.destination&&e.destination.url;' +
-          'if(!dest)return;' +
-          'if(dest.indexOf(SELF_ORIGIN)!==0){e.preventDefault();window.location.href=toProxy(dest);}' +
-        '});' +
-      '}' +
-    '}catch(e){}' +
-    'try{' +
-      'function patchSrcProp(proto,attr){' +
-        'var desc=Object.getOwnPropertyDescriptor(proto,attr);' +
-        'if(!desc||!desc.set)return;' +
-        'Object.defineProperty(proto,attr,{' +
-          'get:desc.get,' +
-          'set:function(v){' +
-            'try{' +
-              'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)&&v.indexOf(SELF_ORIGIN)!==0){' +
-                'v=toProxy(v);' +
-              '}' +
-            '}catch(e){}' +
-            'return desc.set.call(this,v);' +
-          '},' +
-          'configurable:true' +
-        '});' +
-      '}' +
-      'patchSrcProp(HTMLScriptElement.prototype,"src");' +
-      'patchSrcProp(HTMLImageElement.prototype,"src");' +
-      'patchSrcProp(HTMLIFrameElement.prototype,"src");' +
-      'patchSrcProp(HTMLLinkElement.prototype,"href");' +
-    '}catch(e){}' +
-    'try{' +
-      'var seenEls=new WeakSet();' +
-      'var pending=new Set();' +
-      'var scheduled=false;' +
-      'function rewriteEl(el){' +
-        'if(!el||!el.getAttribute||seenEls.has(el))return;' +
-        'seenEls.add(el);' +
-        'var tag=el.tagName;' +
-        'if(tag==="A"&&el.getAttribute("target")==="_blank"){' +
-          'var style=el.style;' +
-          'if(style&&(style.display==="none"||style.visibility==="hidden")){' +
-            'el.removeAttribute("target");' +
-          '}' +
-          'return;' +
-        '}' +
-        'if(tag==="SCRIPT"||tag==="IMG"||tag==="IFRAME"){' +
-          'var src=el.getAttribute("src");' +
-          'if(src&&/^https?:\\/\\//i.test(src)&&src.indexOf(SELF_ORIGIN)!==0){' +
-            'el.setAttribute("src",toProxy(src));' +
-          '}' +
-          'return;' +
-        '}' +
-        'if(tag==="LINK"){' +
-          'var href=el.getAttribute("href");' +
-          'if(href&&/^https?:\\/\\//i.test(href)&&href.indexOf(SELF_ORIGIN)!==0){' +
-            'el.setAttribute("href",toProxy(href));' +
-          '}' +
-        '}' +
-      '}' +
-      'var flushBudgetMs=8;' +
-      'var observerDisabled=false;' +
-      'var mo;' +
-      'function flush(){' +
-        'scheduled=false;' +
-        'var start=performance.now();' +
-        'pending.forEach(function(n){' +
-          'if(!n.isConnected)return;' +
-          'rewriteEl(n);' +
-          'if(n.querySelectorAll){' +
-            'var found=n.querySelectorAll("script[src],img[src],iframe[src],link[href],a[target=_blank]");' +
-            'for(var i=0;i<found.length;i++)rewriteEl(found[i]);' +
-          '}' +
-        '});' +
-        'pending.clear();' +
-        'if(performance.now()-start>flushBudgetMs*4&&mo){' +
-          'observerDisabled=true;mo.disconnect();' +
-          'console.warn("[sandbox] MutationObserver disabled \u2014 flush() exceeded budget");' +
-        '}' +
-      '}' +
-      'function schedule(){' +
-        'if(scheduled)return;scheduled=true;' +
-        '(window.requestIdleCallback||window.requestAnimationFrame)(flush);' +
-      '}' +
-      'mo=new MutationObserver(function(muts){' +
-        'if(observerDisabled)return;' +
-        'for(var i=0;i<muts.length;i++){' +
-          'var m=muts[i];' +
-          'if(m.type==="attributes"){pending.add(m.target);continue;}' +
-          'var added=m.addedNodes;' +
-          'for(var j=0;j<added.length;j++){if(added[j].nodeType===1)pending.add(added[j]);}' +
-        '}' +
-        'if(pending.size)schedule();' +
-      '});' +
-      'mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:["src","href"]});' +
-    '}catch(e){}' +
-  '}' +
-'})();</script>';
-function rewriteJsSource(js) {
-  var assignPattern = /((?:window\.|document\.)?location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\2/gi;
-  js = js.replace(assignPattern, function(match, target, quote, url) {
-    if (/^https?:\/\//i.test(url)) {
-      return target + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
-    }
-    if (url.indexOf('//') === 0) {
-      return target + ' = ' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
-    }
-    return match;
-  });
-  var methodPattern = /((?:window\.|document\.)?location)\.(assign|replace)\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3\s*\)/gi;
-  js = js.replace(methodPattern, function(match, loc, method, quote, url) {
-    if (/^https?:\/\//i.test(url)) {
-      return loc + '.' + method + '(' + quote + '/proxy/' + encodeURIComponent(url) + quote + ')';
-    }
-    if (url.indexOf('//') === 0) {
-      return loc + '.' + method + '(' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote + ')';
-    }
-    return match;
-  });
-  var openPattern = /window\.open\s*\(\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\1/gi;
-  js = js.replace(openPattern, function(match, quote, url) {
-    if (/^https?:\/\//i.test(url)) {
-      return 'window.open(' + quote + '/proxy/' + encodeURIComponent(url) + quote;
-    }
-    if (url.indexOf('//') === 0) {
-      return 'window.open(' + quote + '/proxy/' + encodeURIComponent('https:' + url) + quote;
-    }
-    return match;
-  });
-  var topPattern = /(top|parent)\.(location(?:\.href)?)\s*=\s*(["'`])((?:https?:)?\/\/[^"'`\s]+)\3/gi;
-  js = js.replace(topPattern, function(match, scope, loc, quote, url) {
-    if (/^https?:\/\//i.test(url)) {
-      return scope + '.' + loc + ' = ' + quote + '/proxy/' + encodeURIComponent(url) + quote;
-    }
-    return match;
-  });
-  return js;
-}
-function rewriteInlineScripts(html) {
-  return html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, function(match, attrs, content) {
-    if (/\bsrc\s*=/i.test(attrs)) return match;
-    if (!content.trim()) return match;
-    var rewritten = rewriteJsSource(content);
-    return '<script' + attrs + '>' + rewritten + '</script>';
-  });
-}
-function parseUniversalURL(pathname, search) {
-  var targetPath = pathname.charAt(0) === '/' ? pathname.slice(1) : pathname;
-  if (!targetPath) return null;
-  if (targetPath.indexOf('proxy/') === 0) {
-    var rest = targetPath.substring(6);
-    var d;
-    try { d = decodeURIComponent(rest); } catch(e) { d = rest; }
-    if (d.indexOf('://') === -1) {
-      d = 'https://' + d;
-    }
-    if (search) d += search;
-    return d;
-  }
-  var targetURL = targetPath;
-  try {
-    var decoded = decodeURIComponent(targetPath);
-    if (decoded.indexOf('://') !== -1) {
-      targetURL = decoded;
-      if (search) targetURL += search;
-      return targetURL;
-    }
-    targetURL = decoded;
-  } catch(e) {}
-  if (targetURL.indexOf('http://') === 0 || targetURL.indexOf('https://') === 0) {
-    if (search) targetURL += search;
-    return targetURL;
-  }
-  return search ? 'https://' + targetURL + search : 'https://' + targetURL;
-}
-async function handleRequest(request) {
-  var url = new URL(request.url);
-  var pathname = url.pathname;
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD',
-        'Access-Control-Allow-Headers': '*',
-        'Access-Control-Max-Age': '86400'
-      }
-    });
-  }
-  if (isCloudMoonPath(pathname)) {
-    var targetPath = pathname + url.search;
-    var _d = ['app', 'com'], _n = 'cloudmoon', _w = 'web';
-    var cmDomain = _w + '.' + _n + _d[0] + '.' + _d[1];
-    var cloudmoonUrl = 'https://' + cmDomain + targetPath.replace(new RegExp('^\/(web\\.)?' + _n + _d[0] + '\\.' + _d[1]), '');
-    var encoded = encodeUrl(cloudmoonUrl);
-    var iframeSrc = CLOUDMOON_PROXY + '?u=' + encoded;
-    var cmHtml = '<!DOCTYPE html><html><head><meta charset="UTF-8">' +
-      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<title>Home - Classroom</title>' +
-      '<style>*{margin:0;padding:0;box-sizing:border-box}' +
-      'html,body{width:100%;height:100%;overflow:hidden;background:#fff}' +
-      'iframe{width:100%;height:100%;border:none}</style></head><body>' +
-      '<iframe src="' + iframeSrc + '"' +
-      ' allow="accelerometer;camera;encrypted-media;geolocation;gyroscope;hid;microphone;midi;clipboard-read;clipboard-write;xr-spatial-tracking;gamepad"' +
-      ' sandbox="allow-forms allow-modals allow-presentation allow-same-origin allow-scripts allow-downloads allow-pointer-lock"' +
-      '></iframe></body></html>';
-    return new Response(cmHtml, {
-      headers: {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Permissions-Policy': 'accelerometer=*, gyroscope=*, camera=*, microphone=*, geolocation=*, hid=*, midi=*, clipboard-read=*, clipboard-write=*, xr-spatial-tracking=*, gamepad=*'
-      }
-    });
-  }
-  if (pathname === '/' || pathname === '') {
-    return new Response('url not specified', {
-      headers: { 'Content-Type': 'text/plain' }
-    });
-  }
-  var targetURL = parseUniversalURL(pathname, url.search);
-  if (!targetURL) {
-    return new Response('Invalid URL', { status: 400 });
-  }
-  try { new URL(targetURL); } catch(e) {
-    return new Response('Invalid URL', { status: 400 });
-  }
-  if (isAdRequest(targetURL)) {
-    return new Response('', { status: 204 });
-  }
-  var fwdHeaders = new Headers(request.headers);
-  fwdHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
-  fwdHeaders.delete('Host');
-  fwdHeaders.delete('Origin');
-  fwdHeaders.delete('cf-connecting-ip');
-  fwdHeaders.delete('cf-ray');
-  fwdHeaders.delete('cf-visitor');
-  fwdHeaders.delete('cf-worker');
-  fwdHeaders.delete('x-forwarded-proto');
-  fwdHeaders.delete('x-forwarded-for');
-  fwdHeaders.delete('x-forwarded-host');
-  fwdHeaders.delete('x-real-ip');
-  fwdHeaders.delete('sec-fetch-site');
-  fwdHeaders.delete('sec-fetch-mode');
-  fwdHeaders.delete('sec-fetch-dest');
-  fwdHeaders.delete('sec-fetch-user');
-  var fetchOpts = {
-    method: request.method,
-    headers: fwdHeaders,
-    redirect: 'follow'
-  };
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    fetchOpts.body = request.body;
-  }
-  var resp;
-  try {
-    resp = await fetch(targetURL, fetchOpts);
-  } catch(err) {
-    return new Response('Failed to fetch: ' + (err.message || err), { status: 502 });
-  }
-  var contentType = (resp.headers.get('Content-Type') || '').toLowerCase();
-  if (contentType.indexOf('text/html') === -1) {
-    var passH = new Headers(resp.headers);
-    passH.set('Access-Control-Allow-Origin', '*');
-    stripSecurityHeaders(passH);
-    if (contentType.indexOf('javascript') !== -1) {
-      try {
-        var jsSource = await resp.text();
-        jsSource = rewriteJsSource(jsSource);
-        passH.set('Cache-Control', 'public, max-age=86400');
-        return new Response(jsSource, {
-          status: resp.status, statusText: resp.statusText, headers: passH
-        });
-      } catch(e) {
-      }
-    }
-    if (contentType.indexOf('image/') !== -1 || contentType.indexOf('font/') !== -1 || contentType.indexOf('css') !== -1) {
-      passH.set('Cache-Control', 'public, max-age=86400');
-    }
-    if (resp.headers.has('Content-Range')) passH.set('Content-Range', resp.headers.get('Content-Range'));
-    if (resp.headers.has('Accept-Ranges')) passH.set('Accept-Ranges', resp.headers.get('Accept-Ranges'));
-    if (typeof resp.headers.getSetCookie === 'function') {
-      var cookies1 = resp.headers.getSetCookie();
-      if (cookies1.length) {
-        passH.delete('Set-Cookie');
-        cookies1.forEach(function(c) {
-          var rewritten = c.replace(/;\s*[Dd]omain=[^;]+/i, '').replace(/;\s*[Ss]ecure/gi, '');
-          passH.append('Set-Cookie', rewritten);
-        });
-      }
-    }
-    return new Response(resp.body, {
-      status: resp.status, statusText: resp.statusText, headers: passH
-    });
-  }
-  var pageHtml;
-  try {
-    pageHtml = await rewriteIframesAndAssets(await resp.clone().text(), resp.url, url.origin);
-  } catch(err) {
-    try {
-      pageHtml = await resp.text();
-    } catch(err2) {
-      return new Response('Failed to read response: ' + (err2.message || err2), { status: 502 });
-    }
-  }
-  pageHtml = blockAdsInHTML(pageHtml);
-  pageHtml = injectInHead(pageHtml, '<base href="' + resp.url + '">');
-  pageHtml = injectInHead(pageHtml, AD_BLOCKER);
-  var realBase, realOrigin;
-  try { var _u = new URL(resp.url); realBase = _u.href; realOrigin = _u.origin; } catch(e) { realBase = ''; realOrigin = ''; }
-  pageHtml = injectInHead(pageHtml, SANDBOX_SCRIPT
-    .replace('__REAL_BASE__', realBase)
-    .replace('__REAL_ORIGIN__', realOrigin));
-  pageHtml = rewriteInlineScripts(pageHtml);
-  var htmlH = new Headers(resp.headers);
-  htmlH.set('Content-Type', 'text/html; charset=utf-8');
-  htmlH.set('Access-Control-Allow-Origin', '*');
-  stripSecurityHeaders(htmlH);
-  htmlH.set('Content-Security-Policy',
-    "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-ancestors *");
-  if (typeof resp.headers.getSetCookie === 'function') {
-    var cookies2 = resp.headers.getSetCookie();
-    if (cookies2.length) {
-      htmlH.delete('Set-Cookie');
-      cookies2.forEach(function(c) {
-        var rewritten = c.replace(/;\s*[Dd]omain=[^;]+/i, '').replace(/;\s*[Ss]ecure/gi, '');
-        htmlH.append('Set-Cookie', rewritten);
-      });
-    }
-  }
-  return new Response(pageHtml, {
-    status: resp.status, statusText: resp.statusText, headers: htmlH
-  });
-}
-return {
-  async fetch(request, env, ctx) {
-    try {
-      return await handleRequest(request);
-    } catch(e) {
-      return new Response('Proxy error: ' + (e.message || e), {
-        status: 500,
-        headers: { 'Content-Type': 'text/plain' }
-      });
-    }
-  }
-};
-})();
-
 export default {
   async fetch(request, env, ctx) {
     try {
-      var u = new URL(request.url);
-      var p = u.pathname;
-      if (p === SJ_PREFIX || p.indexOf(SJ_PREFIX + '/') === 0) {
-        var rest = p.slice(SJ_PREFIX.length);
-        if (rest === '' || rest.charAt(0) !== '/') rest = '/' + rest;
-        return await handleRequest(request, env, ctx, rest);
+      var res = await handleRequest(request, env, ctx);
+      if (res && res.status === 502) {
+        var rec = refererRecovery(request);
+        if (rec) return rec;
       }
-      return await HZP_OLD.fetch(request, env, ctx);
+      return res;
     } catch (e) {
       return new Response('Proxy error: ' + (e.message || e), {
         status: 500,
