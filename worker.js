@@ -4,7 +4,7 @@ var HZP = {
   CACHE_ASSETS: true,
   COOKIE_ISOLATION: true,
   CROSS_ORIGIN_ISOLATION: true,
-  CLIENT_VERSION: 15,
+  CLIENT_VERSION: 20,
   UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 };
 
@@ -223,7 +223,7 @@ function encodeRequestCookie(cookieHeader, host) {
   }
   return out.length ? out.join('; ') : null;
 }
-function rewriteSetCookie(c, host) {
+function rewriteSetCookie(c, host, secureAttr) {
   if (!c || !host) return c;
   var eq = c.indexOf('=');
   if (eq === -1) return c;
@@ -233,7 +233,12 @@ function rewriteSetCookie(c, host) {
   prefixed = prefixed.replace(/;\s*[Dd]omain\s*=[^;]*/g, '');
   if (/;\s*[Pp]ath\s*=/.test(prefixed)) prefixed = prefixed.replace(/;\s*[Pp]ath\s*=[^;]*/g, '; Path=/');
   else prefixed += '; Path=/';
-  if (!/;\s*[Ss]ameSite\s*=/i.test(prefixed)) prefixed += '; SameSite=Lax';
+  if (secureAttr) {
+    prefixed = prefixed.replace(/;\s*[Ss]ameSite\s*=[^;]*/g, '');
+    prefixed += '; SameSite=None; Secure';
+  } else if (!/;\s*[Ss]ameSite\s*=/i.test(prefixed)) {
+    prefixed += '; SameSite=Lax';
+  }
   return prefixed;
 }
 
@@ -494,22 +499,22 @@ function jsWsProxyUrl(url, quote, proxyOrigin) {
 var JS_PATTERNS = [
   {
     pre: true,
-    re: /(^|[^\w$.])((?:(?:window|self|document|top|parent)\.)?\blocation\.(pathname|href|search|hash|hostname|host|origin|port|protocol))(?!\s*(?:=[^=]|[+\-\*/%]=|\+\+|--))/g,
+    re: /(^|[^\w$.#])((?:(?:window|self|document|top|parent)\.)?\blocation\.(pathname|href|search|hash|hostname|host|origin|port|protocol))(?!\s*(?:=[^=]|[+\-\*/%]=|\+\+|--))/g,
     make: function (m, pre, expr, prop) { return pre + 'self.__hzpLoc("' + prop + '")'; }
   },
   {
     pre: true,
-    re: /(^|[^\w$.])((?:window|self|document|top|parent)\.location)(?![\w$])/g,
+    re: /(^|[^\w$.#])((?:window|self|document|top|parent)\.location)(?![\w$])/g,
     make: function (m, pre, expr) { return pre + 'self.__hzpLocObj'; }
   },
   {
     pre: true,
-    re: /(^|[^\w$.])(?<!\b(?:var|let|const)[ \t\r\n]+)(location)(?=[.\[]|\s*=(?!=))/g,
+    re: /(^|[^\w$.#])(?<!\b(?:var|let|const)[ \t\r\n]+)(location)(?=[.\[]|\s*=(?!=|>))/g,
     make: function (m, pre, expr) { return pre + 'self.__hzpLocObj'; }
   },
   {
     pre: true,
-    re: /(^|[^\w$.])([\w$]+)\.location(?![\w$])(?=$|\s*[;,)\]}\[?]|\s*[+\-*\/%]|\s*(?:==|!=|<=|>=|\?\.?|&&|\|\||\?\?)|\s*\.(?:pathname|href|search|hash|hostname|host|origin|port|protocol|assign|replace|reload|toString|valueOf)\b)/g,
+    re: /(^|[^\w$.#])([\w$]+)\.location(?![\w$])(?=$|\s*[;,)\]}\[?]|\s*[+\-*\/%]|\s*(?:==|!=|<=|>=|\?\.?|&&|\|\||\?\?)|\s*\.(?:pathname|href|search|hash|hostname|host|origin|port|protocol|assign|replace|reload|toString|valueOf)\b)/g,
     make: function (m, pre, ident) { return pre + '(' + ident + '===self||(typeof Window!=="undefined"&&' + ident + ' instanceof Window)?self.__hzpLocObj:(' + ident + ').location)'; }
   },
   {
@@ -519,12 +524,12 @@ var JS_PATTERNS = [
   },
   {
     pre: true,
-    re: /(^|[^\w$.])((?:(?:window|self|document|top|parent)\.)?location)\.(assign|replace)\s*\(\s*(["'])([^"'\s]+)\4/g,
+    re: /(^|[^\w$.#])((?:(?:window|self|document|top|parent)\.)?location)\.(assign|replace)\s*\(\s*(["'])([^"'\s]+)\4/g,
     make: function (m, pre, loc, method, q, u, rb, po) { return pre + loc + '.' + method + '(' + jsProxyUrl(u, q, rb, po); }
   },
   {
     pre: true,
-    re: /(^|[^\w.$])(?:window\.)?open\s*\(\s*(["'])([^"'\s]+)\2/g,
+    re: /(^|[^\w.$#])(?:window\.)?open\s*\(\s*(["'])([^"'\s]+)\2/g,
     make: function (m, pre, q, u, rb, po) { return pre + 'open(' + jsProxyUrl(u, q, rb, po); }
   },
   {
@@ -554,12 +559,12 @@ var JS_PATTERNS = [
   },
   {
     pre: true,
-    re: /(^|[^\w$."'`])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.postMessage(\s*\()/g,
+    re: /(^|[^\w$."'`#])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.postMessage(\s*\()/g,
     make: function (m, pre, obj, paren) { return pre + 'self.__hzpPMW(' + obj + ').postMessage' + paren; }
   },
   {
     pre: true,
-    re: /(^|[^\w$."'`])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\?\.postMessage(\s*\()/g,
+    re: /(^|[^\w$."'`#])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\?\.postMessage(\s*\()/g,
     make: function (m, pre, obj, paren) { return pre + 'self.__hzpPMW(' + obj + ').postMessage' + paren; }
   }
 ];
@@ -1785,6 +1790,9 @@ function hookHtmlStrings() {
   } catch (e) {}
 }
 
+var HZ_BLOB_WRAP = null;
+var HZ_BLOB_REV = null;
+var HZ_BLOB_DEC = null;
 function hookUrlProperties() {
   Object.keys(ATTR_OBJECT).forEach(function (attr) {
     ATTR_OBJECT[attr].forEach(function (className) {
@@ -1817,6 +1825,7 @@ function hookUrlProperties() {
             var out;
             if (isSrcset) out = srcsetValue(s);
             else if (attr === 'srcdoc') out = rewriteHtmlString(s);
+            else if (HZ_BLOB_DEC && HZ_BLOB_DEC.has(s)) out = (HZ_BLOB_REV && HZ_BLOB_REV.get(s)) || s;
             else out = (realFrom(s) ? s : toProxy(s));
             return desc.set.call(this, out == null ? '' : out);
           } catch (e) { try { return desc.set.call(this, v); } catch (e2) {} }
@@ -2135,13 +2144,14 @@ function hookCookies() {
         var realHost = '';
         try { realHost = realUrlObj().hostname; } catch (e) {}
         if (!realHost) return c.set(v);
-        var eq = v.indexOf('=');
+        var cleaned = v.replace(/;\\s*domain=[^;]*/gi, '');
+        var eq = cleaned.indexOf('=');
         if (eq > 0) {
-          var name = v.slice(0, eq);
-                    if (name.indexOf('hz-') !== 0) return c.set('hz-' + realHost + ':' + v);
+          var name = cleaned.slice(0, eq);
+          if (name.indexOf('hz-') !== 0) return c.set('hz-' + realHost + ':' + cleaned);
         }
-        return c.set(v);
-      } catch (e) { try { c.set(c.value); } catch (e2) {} }
+        return c.set(cleaned);
+      } catch (e) { try { c.set(String(c.value || '').replace(/;\\s*domain=[^;]*/gi, '')); } catch (e2) {} }
     }
   });
   try { delete self.cookieStore; } catch (e) {}
@@ -2449,15 +2459,130 @@ function hookRequests() {
       });
     }
   } catch (e) {}
+  var NATIVE_COU = null;
+  var NATIVE_ROU = null;
+  try {
+    if (self.URL && typeof self.URL.createObjectURL === 'function' && typeof self.Blob === 'function') {
+      NATIVE_COU = self.URL.createObjectURL;
+      NATIVE_ROU = self.URL.revokeObjectURL;
+      HZ_BLOB_WRAP = new Map();
+      HZ_BLOB_REV = new Map();
+      HZ_BLOB_DEC = new Set();
+      try { self.__hzpNCOU = function (b) { return NATIVE_COU.call(self.URL, b); }; } catch (e) {}
+      try {
+        self.URL.createObjectURL = function (blob) {
+          try {
+            var bt = String((blob && blob.type) || '').toLowerCase();
+            if (bt.indexOf('javascript') !== -1 || bt.indexOf('ecmascript') !== -1 || bt.indexOf('module') !== -1) {
+              var rurl = NATIVE_COU.call(self.URL, blob);
+              var durl = NATIVE_COU.call(self.URL, new Blob([hzModuleBlobDecider(rurl)], { type: 'text/javascript' }));
+              HZ_BLOB_WRAP.set(rurl, durl);
+              HZ_BLOB_REV.set(durl, rurl);
+              HZ_BLOB_DEC.add(durl);
+              return durl;
+            }
+          } catch (e) {}
+          return NATIVE_COU.apply(self.URL, arguments);
+        };
+      } catch (e) {}
+      try {
+        self.URL.revokeObjectURL = function (u) {
+          try {
+            var s = String(u);
+            if (HZ_BLOB_WRAP.has(s) || HZ_BLOB_REV.has(s)) {
+              setTimeout(function () { try { NATIVE_ROU.call(self.URL, s); } catch (e) {} }, 60000);
+              return;
+            }
+          } catch (e) {}
+          return NATIVE_ROU.apply(self.URL, arguments);
+        };
+      } catch (e) {}
+    }
+  } catch (e) {}
+
+  function hzPxSrc() {
+    return 'function px(v){try{var s=String(v==null?"":v);if(!s)return v;if(s.indexOf(PO)===0)return v;' +
+      'if(/^(mailto:|tel:|sms:|about:|blob:|data:|javascript:)/i.test(s))return v;' +
+      'var a=new URL(s,self.location.href);' +
+      'if(a.protocol==="http:"||a.protocol==="https:"){if(a.origin===PO)return v;return PO+"/"+a.href;}' +
+      'if(a.protocol==="ws:"||a.protocol==="wss:")return PO+"/"+(a.protocol==="wss:"?"wss":"ws")+"/"+a.host+a.pathname+a.search;' +
+      'return v;}catch(e){return v;}}';
+  }
+
+  function hzModuleBlobDecider(realUrl) {
+    return 'var PO=' + JSON.stringify(PROXY_ORIGIN) + ';var R=' + JSON.stringify(realUrl) + ';' +
+      hzPxSrc() +
+      'self.__hzd=1;' +
+      'try{if(typeof self.__hzpClient==="undefined"){' +
+      'try{var f=self.fetch;if(f)self.fetch=function(i,o){try{if(typeof i==="string")i=px(i);else if(i&&typeof i.url==="string"){var p2=px(i.url);if(p2!==i.url)i=new Request(p2,i);}}catch(e){}return f.call(self,i,o);};}catch(e){}' +
+      'try{if(self.XMLHttpRequest){var oo=self.XMLHttpRequest.prototype.open;self.XMLHttpRequest.prototype.open=function(m,u){try{arguments[1]=px(u);}catch(e){}return oo.apply(this,arguments);};}}catch(e){}' +
+      'try{if(self.WebSocket){var OW=self.WebSocket;var NW=function W(u,p){return new OW(px(u),p);};NW.prototype=OW.prototype;self.WebSocket=NW;}}catch(e){}' +
+      '}}catch(e){}' +
+      'var __hzd;' +
+      'export{__hzd as default};' +
+      'try{var t=await (await fetch(R)).text();' +
+      'var BAD="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$."+String.fromCharCode(39)+String.fromCharCode(34);' +
+      'var out="",i2=0;' +
+      'while(true){var j=t.indexOf("import",i2);if(j<0){out+=t.slice(i2);break;}var ok=true;var c0=j>0?t.charAt(j-1):"";if(c0!==""&&BAD.indexOf(c0)>=0)ok=false;var k2=j+6;while(t.charAt(k2)===" ")k2++;if(t.charAt(k2)!=="(")ok=false;if(ok){out+=t.slice(i2,j)+"__hzpi";i2=k2;}else{out+=t.slice(i2,j+6);i2=j+6;}}' +
+      'var pre=out.indexOf("__hzpi")>=0?("var PO="+JSON.stringify(PO)+";function __hzpi(u){return import(__hzpx(u));}var __hzpx="+px.toString()+";"):"";' +
+      'var COU=self.__hzpNCOU;' +
+      'var u2=COU?COU(new Blob([pre+out],{type:"text/javascript"})):URL.createObjectURL(new Blob([pre+out],{type:"text/javascript"}));' +
+      'var m=await import(u2);__hzd=m.default;' +
+      '}catch(e){try{var m2=await import(R);__hzd=m2.default;}catch(e2){}}';
+  }
+
+  function hzWorkerPatchBody() {
+    return '(function(){var PO=' + JSON.stringify(PROXY_ORIGIN) + ';' +
+      hzPxSrc() +
+      'try{var f=self.fetch;if(f)self.fetch=function(i,o){try{if(typeof i==="string")i=px(i);else if(i&&typeof i.url==="string"){var p2=px(i.url);if(p2!==i.url)i=new Request(p2,i);}}catch(e){}return f.call(self,i,o);};}catch(e){}' +
+      'try{if(self.XMLHttpRequest){var oo=self.XMLHttpRequest.prototype.open;self.XMLHttpRequest.prototype.open=function(m,u){try{arguments[1]=px(u);}catch(e){}return oo.apply(this,arguments);};}}catch(e){}' +
+      'try{if(self.WebSocket){var OW=self.WebSocket;var NW=function W(u,p){return new OW(px(u),p);};NW.prototype=OW.prototype;self.WebSocket=NW;}}catch(e){}' +
+      'try{if(self.EventSource){var OE=self.EventSource;var NE=function E(u,p){return new OE(px(u),p);};NE.prototype=OE.prototype;self.EventSource=NE;}}catch(e){}' +
+      'function hzc(a){try{var s=String(a);if(s.indexOf("blob:")!==0)return px(a);var x=new XMLHttpRequest();x.open("GET",s,false);x.send();var t=String(x.responseText||"");var Q=String.fromCharCode(34);var k=t.indexOf("var R="+Q);if(k>=0&&t.indexOf("__hzd")>=0){var q=t.indexOf(Q,k+7);if(q>k)return t.slice(k+7,q);}}catch(e){}return px(a);}' +
+      'try{var ois=self.importScripts;if(ois)self.importScripts=function(){var a=[];for(var i=0;i<arguments.length;i++)a.push(hzc(arguments[i]));return ois.apply(self,a);};}catch(e){}' +
+      'self.__hzpWorkerProxy=px;})()';
+  }
+
+  function hzWrapBlobWorker(realUrl, isModule) {
+    try {
+      if (!NATIVE_COU || !HZ_BLOB_WRAP) return realUrl;
+      var src = hzWorkerPatchBody() + (isModule
+        ? ';await import(' + JSON.stringify(realUrl) + ');'
+        : ';self.importScripts(' + JSON.stringify(realUrl) + ');');
+      var wurl = NATIVE_COU.call(self.URL, new Blob([src], { type: 'text/javascript' }));
+      HZ_BLOB_WRAP.set(realUrl, wurl);
+      setTimeout(function () { try { NATIVE_ROU.call(self.URL, wurl); } catch (e) {} }, 120000);
+      return wurl;
+    } catch (e) { return realUrl; }
+  }
+
   try {
     if (self.Worker) {
       makeProxy('Worker', function (ctx) {
-        try { if (ctx.args[0]) ctx.args[0] = toProxy(String(ctx.args[0])); } catch (e) {}
+        try {
+          if (ctx.args[0]) {
+            var ws0 = String(ctx.args[0]);
+            if (ws0.indexOf('blob:') === 0) {
+              var wm0 = !!(ctx.args[1] && ctx.args[1].type === 'module');
+              if (HZ_BLOB_DEC && HZ_BLOB_DEC.has(ws0)) ctx.args[0] = hzWrapBlobWorker(wm0 ? ws0 : ((HZ_BLOB_REV && HZ_BLOB_REV.get(ws0)) || ws0), wm0);
+              else ctx.args[0] = hzWrapBlobWorker(ws0, wm0);
+            } else ctx.args[0] = toProxy(ws0);
+          }
+        } catch (e) {}
       });
     }
     if (self.SharedWorker) {
       makeProxy('SharedWorker', function (ctx) {
-        try { if (ctx.args[0]) ctx.args[0] = toProxy(String(ctx.args[0])); } catch (e) {}
+        try {
+          if (ctx.args[0]) {
+            var ss0 = String(ctx.args[0]);
+            if (ss0.indexOf('blob:') === 0) {
+              var sm0 = !!(ctx.args[1] && ctx.args[1].type === 'module');
+              if (HZ_BLOB_DEC && HZ_BLOB_DEC.has(ss0)) ctx.args[0] = hzWrapBlobWorker(sm0 ? ss0 : ((HZ_BLOB_REV && HZ_BLOB_REV.get(ss0)) || ss0), sm0);
+              else ctx.args[0] = hzWrapBlobWorker(ss0, sm0);
+            } else ctx.args[0] = toProxy(ss0);
+          }
+        } catch (e) {}
       });
     }
     if (self.Worklet && self.Worklet.prototype.addModule) {
@@ -3211,13 +3336,57 @@ async function handleRequest(request, env, ctx, pathOverride) {
     else fwdHeaders.delete('Cookie');
   }
 
+  var secureCk = url.protocol === 'https:' || url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
   var fetchOpts = { method: request.method, headers: fwdHeaders, redirect: 'follow' };
   if (request.method !== 'GET' && request.method !== 'HEAD') {
-    fetchOpts.body = request.body;
+    var bodyBytes = null;
+    try { bodyBytes = await request.arrayBuffer(); }
+    catch (e) { return new Response('Failed to read request body: ' + (e.message || e), { status: 400 }); }
+    if (bodyBytes && bodyBytes.byteLength > 0) {
+      fwdHeaders.delete('Content-Length');
+      fwdHeaders.delete('Transfer-Encoding');
+      fetchOpts.body = bodyBytes;
+    }
   }
   var resp;
   try { resp = await fetch(targetURL, fetchOpts); }
   catch (err) { return new Response('Failed to fetch: ' + (err.message || err), { status: 502 }); }
+
+  if (request.method === 'GET' && resp.status === 200 && isHtmlContentType(resp.headers.get('Content-Type') || '')) {
+    var wantJson = false;
+    try {
+      var accH = String(request.headers.get('accept') || '').toLowerCase();
+      var xrwH = String(request.headers.get('x-requested-with') || '').toLowerCase();
+      if (accH.indexOf('application/json') !== -1 || xrwH === 'xmlhttprequest') {
+        wantJson = true;
+      } else if (accH.indexOf('*/*') !== -1) {
+        wantJson = /\/api\//i.test(targetURLObject.pathname) || /(^|\.)api\./i.test(targetURLObject.hostname);
+      }
+    } catch (e) {}
+    if (wantJson) {
+      for (var rtry = 0; rtry < 2; rtry++) {
+        try {
+          var scv = resp.headers.getSetCookie ? resp.headers.getSetCookie() : [];
+          if (scv && scv.length) {
+            var extra = [];
+            for (var ci = 0; ci < scv.length; ci++) {
+              var pair = String(scv[ci]).split(';')[0];
+              if (pair.indexOf('=') > 0 && pair.length < 4000) extra.push(pair);
+            }
+            if (extra.length) {
+              var curCk = fetchOpts.headers.get('Cookie') || '';
+              fetchOpts.headers.set('Cookie', curCk ? (curCk + '; ' + extra.join('; ')) : extra.join('; '));
+            }
+          }
+        } catch (e) {}
+        var resp2;
+        try { resp2 = await fetch(targetURL, fetchOpts); }
+        catch (e2) { break; }
+        resp = resp2;
+        if (resp2.status < 400 && !isHtmlContentType(resp2.headers.get('Content-Type') || '')) break;
+      }
+    }
+  }
 
   var contentType = resp.headers.get('Content-Type') || '';
 
@@ -3244,13 +3413,13 @@ async function handleRequest(request, env, ctx, pathOverride) {
     stripSecurityHeaders(outHeaders);
     if (HZP.CROSS_ORIGIN_ISOLATION) {
       outHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
-      outHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+      outHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless');
     }
     outHeaders.set('Cross-Origin-Resource-Policy', 'cross-origin');
     outHeaders.delete('Content-Length');
     outHeaders.delete('Content-Encoding');
     outHeaders.delete('Transfer-Encoding');
-    if (HZP.COOKIE_ISOLATION) rewriteSetCookieOnHeaders(resp, outHeaders, host);
+    if (HZP.COOKIE_ISOLATION) rewriteSetCookieOnHeaders(resp, outHeaders, host, secureCk);
     rewriteResponseUrlHeaders(outHeaders, resp.url || targetURL, url.origin);
 
         var transformed = buildHtmlRewriter(realBase, proxyOrigin)
@@ -3262,7 +3431,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
   }
 
   if (isCssContentType(contentType)) {
-    var cssH = passThroughHeaders(resp, host, url.origin);
+    var cssH = passThroughHeaders(resp, host, url.origin, secureCk);
     try {
       var css = await resp.text();
       css = rewriteCssUrls(css, resp.url || targetURL, url.origin);
@@ -3275,7 +3444,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
   }
 
     if (isJsContentType(contentType)) {
-    var passH = passThroughHeaders(resp, host, url.origin);
+    var passH = passThroughHeaders(resp, host, url.origin, secureCk);
     try {
       var js = await resp.text();
       try { js = rewriteJsSource(js, new URL(resp.url).href, url.origin); }
@@ -3289,7 +3458,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
   }
 
     if (contentType.indexOf('manifest') !== -1 || /\b(?:web)?manifest\.json(?:$|[?#])/i.test(targetURL) || /\.webmanifest(?:$|[?#])/i.test(targetURL)) {
-    var manH = passThroughHeaders(resp, host, url.origin);
+    var manH = passThroughHeaders(resp, host, url.origin, secureCk);
     try {
       var mtxt = await resp.text();
       var mj = JSON.parse(mtxt);
@@ -3311,7 +3480,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
     }
   }
 
-    var streamH = passThroughHeaders(resp, host, url.origin);
+    var streamH = passThroughHeaders(resp, host, url.origin, secureCk);
   var isCacheable = false;
   if (HZP.CACHE_ASSETS && request.method === 'GET' && resp.status === 200 && !streamH.has('Set-Cookie')) {
     var ct = contentType.toLowerCase().split(';')[0].trim();
@@ -3330,27 +3499,27 @@ async function handleRequest(request, env, ctx, pathOverride) {
   return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: streamH });
 }
 
-function rewriteSetCookieOnHeaders(resp, h, host) {
+function rewriteSetCookieOnHeaders(resp, h, host, secureAttr) {
   if (typeof resp.headers.getSetCookie !== 'function') return;
   var cookies = resp.headers.getSetCookie();
   if (!cookies || !cookies.length) return;
   h.delete('Set-Cookie');
-  cookies.forEach(function (c) { h.append('Set-Cookie', rewriteSetCookie(c, host)); });
+  cookies.forEach(function (c) { h.append('Set-Cookie', rewriteSetCookie(c, host, secureAttr)); });
 }
 
-function passThroughHeaders(resp, host, proxyOrigin) {
+function passThroughHeaders(resp, host, proxyOrigin, secureAttr) {
   var h = new Headers(resp.headers);
   h.set('Access-Control-Allow-Origin', '*');
   stripSecurityHeaders(h);
   h.set('Cross-Origin-Resource-Policy', 'cross-origin');
   if (HZP.CROSS_ORIGIN_ISOLATION) {
-    h.set('Cross-Origin-Embedder-Policy', 'require-corp');
+    h.set('Cross-Origin-Embedder-Policy', 'credentialless');
     h.set('Cross-Origin-Opener-Policy', 'same-origin');
   }
   h.delete('Content-Length');
   h.delete('Content-Encoding');
   h.delete('Transfer-Encoding');
-  if (HZP.COOKIE_ISOLATION) rewriteSetCookieOnHeaders(resp, h, host);
+  if (HZP.COOKIE_ISOLATION) rewriteSetCookieOnHeaders(resp, h, host, secureAttr);
   rewriteResponseUrlHeaders(h, resp.url, proxyOrigin);
   return h;
 }
