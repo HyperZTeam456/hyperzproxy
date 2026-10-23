@@ -4,7 +4,7 @@ var HZP = {
   CACHE_ASSETS: true,
   COOKIE_ISOLATION: true,
   CROSS_ORIGIN_ISOLATION: true,
-  CLIENT_VERSION: 20,
+  CLIENT_VERSION: 27,
   UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 };
 
@@ -465,18 +465,50 @@ function makeInCode(ranges) {
     return false;
   };
 }
-var REWRITE_GUARD = "if(typeof self.__hzpLoc!=='function'){self.__hzpLoc=function(p){try{var l=self.location;var v=l&&l[p];return v==null?'':String(v)}catch(e){return ''}}}\n" +
-  "if(typeof self.__hzpLocObj==='undefined'){self.__hzpLocObj=self.location}\n" +
-  "if(typeof self.__hzpPMW!=='function'){self.__hzpPMW=function(w){return w}}\n";
+var REWRITE_GUARD = "(function(g){if(!g)return;if(typeof g.__hzpLoc!=='function'){g.__hzpLoc=function(p){try{var l=g.location;var v=l&&l[p];return v==null?'':String(v)}catch(e){return ''}}}if(typeof g.__hzpLocObj==='undefined'){g.__hzpLocObj=g.location}if(typeof g.__hzpPMW!=='function'){g.__hzpPMW=function(w){return w}}})(typeof globalThis!=='undefined'?globalThis:(typeof self!=='undefined'?self:null));\n";
+function withRewriteGuard(js) {
+  var at = 0, pos = 0;
+  for (;;) {
+    var ws = /^(?:\s+|\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/.exec(js.slice(pos));
+    if (!ws || !ws[0]) break;
+    pos += ws[0].length;
+    var dm = /^(["'])(?:[^"'\\]|\\.)*\1\s*;?/.exec(js.slice(pos));
+    if (!dm) break;
+    pos += dm[0].length;
+    at = pos;
+  }
+  return js.slice(0, at) + REWRITE_GUARD + js.slice(at);
+}
 
+function addQueryParam(href, kv) {
+  var i = href.indexOf('#');
+  var head = i === -1 ? href : href.slice(0, i);
+  var tail = i === -1 ? '' : href.slice(i);
+  var lastCh = head.slice(-1);
+  var sep = lastCh === '?' || lastCh === '&' ? '' : head.indexOf('?') === -1 ? '?' : '&';
+  return head + sep + kv + tail;
+}
+function delQueryParam(href, name) {
+  var i = href.indexOf('#');
+  var head = i === -1 ? href : href.slice(0, i);
+  var tail = i === -1 ? '' : href.slice(i);
+  var q = head.indexOf('?');
+  if (q === -1) return href;
+  var parts = head.slice(q + 1).split('&');
+  var out = [];
+  for (var j = 0; j < parts.length; j++) {
+    if (parts[j] === name || parts[j].indexOf(name + '=') === 0) continue;
+    out.push(parts[j]);
+  }
+  return head.slice(0, q) + (out.length ? '?' + out.join('&') : '') + tail;
+}
 function verHref(href) {
   try {
     if (!HZP.CLIENT_VERSION) return href;
     var u = new URL(href);
     if (!/\.m?js$/i.test(u.pathname) && !/\.cjs$/i.test(u.pathname)) return href;
-    if (u.searchParams.has('__hzpv')) return href;
-    u.searchParams.set('__hzpv', String(HZP.CLIENT_VERSION));
-    return u.href;
+    if (/[?&]__hzpv=/.test(href)) return href;
+    return addQueryParam(href, '__hzpv=' + String(HZP.CLIENT_VERSION));
   } catch (e) { return href; }
 }
 function jsProxyUrl(url, quote, realBase, proxyOrigin) {
@@ -488,34 +520,44 @@ function jsProxyUrl(url, quote, realBase, proxyOrigin) {
     return quote + proxyOrigin + '/' + verHref(abs.href) + quote;
   } catch (e) { return quote + url + quote; }
 }
-function jsWsProxyUrl(url, quote, proxyOrigin) {
+function jsWsProxyUrl(url, quote, proxyOrigin, realBase) {
   try {
     var abs = new URL(url);
     var p = abs.protocol === 'wss:' || abs.protocol === 'https:' ? 'wss' : 'ws';
-    return quote + proxyOrigin + '/' + p + '/' + abs.host + abs.pathname + abs.search + quote;
+    var href = proxyOrigin + '/' + p + '/' + abs.host + abs.pathname + abs.search;
+    try {
+      var ro = new URL(realBase).origin;
+      if (ro) href = addQueryParam(href, '__hzpo=' + encodeURIComponent(ro));
+    } catch (e) {}
+    return quote + href + quote;
   } catch (e) { return quote + url + quote; }
 }
 
 var JS_PATTERNS = [
   {
     pre: true,
-    re: /(^|[^\w$.#])((?:(?:window|self|document|top|parent)\.)?\blocation\.(pathname|href|search|hash|hostname|host|origin|port|protocol))(?!\s*(?:=[^=]|[+\-\*/%]=|\+\+|--))/g,
-    make: function (m, pre, expr, prop) { return pre + 'self.__hzpLoc("' + prop + '")'; }
+    re: /(^|[^\w$.#])((?:(?:window|self|document|top|parent)\??\.)?\blocation\??\.(pathname|href|search|hash|hostname|host|origin|port|protocol))(?![\w$])(?!\s*(?:=[^=]|[+\-\*/%]=|\+\+|--))/g,
+    make: function (m, pre, expr, prop) { return pre + 'globalThis.__hzpLoc("' + prop + '")'; }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$.#])((?:[\w$]+\.)+document)\??\.location\??\.(pathname|href|search|hash|hostname|host|origin|port|protocol)(?![\w$])(?!\s*(?:=[^=]|[+\-\*/%]=|\+\+|--))/g,
+    make: function (m, pre, chain, prop) { return pre + 'globalThis.__hzpLoc("' + prop + '")'; }
   },
   {
     pre: true,
     re: /(^|[^\w$.#])((?:window|self|document|top|parent)\.location)(?![\w$])/g,
-    make: function (m, pre, expr) { return pre + 'self.__hzpLocObj'; }
+    make: function (m, pre, expr) { return pre + 'globalThis.__hzpLocObj'; }
   },
   {
     pre: true,
     re: /(^|[^\w$.#])(?<!\b(?:var|let|const)[ \t\r\n]+)(location)(?=[.\[]|\s*=(?!=|>))/g,
-    make: function (m, pre, expr) { return pre + 'self.__hzpLocObj'; }
+    make: function (m, pre, expr) { return pre + 'globalThis.__hzpLocObj'; }
   },
   {
     pre: true,
     re: /(^|[^\w$.#])([\w$]+)\.location(?![\w$])(?=$|\s*[;,)\]}\[?]|\s*[+\-*\/%]|\s*(?:==|!=|<=|>=|\?\.?|&&|\|\||\?\?)|\s*\.(?:pathname|href|search|hash|hostname|host|origin|port|protocol|assign|replace|reload|toString|valueOf)\b)/g,
-    make: function (m, pre, ident) { return pre + '(' + ident + '===self||(typeof Window!=="undefined"&&' + ident + ' instanceof Window)?self.__hzpLocObj:(' + ident + ').location)'; }
+    make: function (m, pre, ident) { return pre + '(' + ident + '===globalThis||(typeof Window!=="undefined"&&' + ident + ' instanceof Window)?globalThis.__hzpLocObj:(' + ident + ').location)'; }
   },
   {
     pre: false,
@@ -540,7 +582,7 @@ var JS_PATTERNS = [
   {
     pre: false,
     re: /new\s+WebSocket\s*\(\s*(["'])((?:wss?|https?):\/\/[^"'\s]+)\1/g,
-    make: function (m, q, u, rb, po) { return 'new WebSocket(' + jsWsProxyUrl(u, q, po); }
+    make: function (m, q, u, rb, po) { return 'new WebSocket(' + jsWsProxyUrl(u, q, po, rb); }
   },
   {
     pre: false,
@@ -560,12 +602,12 @@ var JS_PATTERNS = [
   {
     pre: true,
     re: /(^|[^\w$."'`#])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.postMessage(\s*\()/g,
-    make: function (m, pre, obj, paren) { return pre + 'self.__hzpPMW(' + obj + ').postMessage' + paren; }
+    make: function (m, pre, obj, paren) { return pre + 'globalThis.__hzpPMW(' + obj + ').postMessage' + paren; }
   },
   {
     pre: true,
     re: /(^|[^\w$."'`#])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\?\.postMessage(\s*\()/g,
-    make: function (m, pre, obj, paren) { return pre + 'self.__hzpPMW(' + obj + ').postMessage' + paren; }
+    make: function (m, pre, obj, paren) { return pre + 'globalThis.__hzpPMW(' + obj + ').postMessage' + paren; }
   }
 ];
 
@@ -680,6 +722,8 @@ function injectInHead(html, content) {
 function stripSecurityHeaders(h) {
   h.delete('Content-Security-Policy');
   h.delete('Content-Security-Policy-Report-Only');
+  h.delete('Referrer-Policy');
+  h.delete('Referrer-Policy-Report-Only');
   h.delete('X-Frame-Options');
   h.delete('Frame-Options');
   h.delete('X-Content-Type-Options');
@@ -703,6 +747,13 @@ function stripSecurityHeaders(h) {
 
 function escapeHtmlAttr(s) {
   return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+}
+function forceFullReferrer(html) {
+  try {
+    html = html.replace(/<meta\b[^>]*\bname\s*=\s*(?:"referrer"|'referrer'|referrer)[^>]*>/gi, '');
+    html = html.replace(/\breferrerpolicy\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, 'referrerpolicy="unsafe-url"');
+  } catch (e) {}
+  return html;
 }
 
 
@@ -734,24 +785,42 @@ var REAL_BASE = %__HZP_REAL_BASE__%;
 var REAL_ORIGIN = %__HZP_REAL_ORIGIN__%;
 var PROXY_ORIGIN = self.__hzpOriginOverride || self.location.origin;
 var HZP_VER = '%__HZP_VER__%';
+function hzpAddQuery(href, kv) {
+  var i = href.indexOf('#');
+  var head = i === -1 ? href : href.slice(0, i);
+  var tail = i === -1 ? '' : href.slice(i);
+  var lastCh = head.slice(-1);
+  var sep = lastCh === '?' || lastCh === '&' ? '' : head.indexOf('?') === -1 ? '?' : '&';
+  return head + sep + kv + tail;
+}
+function hzpDelQuery(href, name) {
+  var i = href.indexOf('#');
+  var head = i === -1 ? href : href.slice(0, i);
+  var tail = i === -1 ? '' : href.slice(i);
+  var q = head.indexOf('?');
+  if (q === -1) return href;
+  var parts = head.slice(q + 1).split('&');
+  var out = [];
+  for (var j = 0; j < parts.length; j++) {
+    if (parts[j] === name || parts[j].indexOf(name + '=') === 0) continue;
+    out.push(parts[j]);
+  }
+  return head.slice(0, q) + (out.length ? '?' + out.join('&') : '') + tail;
+}
 function verUrl(h) {
   try {
     if (!HZP_VER) return h;
-    var u = new SN.URL(h);
+    var s = String(h);
+    var u = new SN.URL(s);
     if (!/\\.m?js$/i.test(u.pathname) && !/\\.cjs$/i.test(u.pathname)) return h;
-    if (!u.searchParams || typeof u.searchParams.has !== 'function' || u.searchParams.has('__hzpv')) return h;
-    u.searchParams.set('__hzpv', HZP_VER);
-    return u.href;
+    if (/[?&]__hzpv=/.test(s)) return h;
+    return hzpAddQuery(s, '__hzpv=' + HZP_VER);
   } catch (e) { return h; }
 }
 function deVerUrl(sv) {
   try {
     if (String(sv).indexOf('__hzpv=') === -1) return sv;
-    var u = new SN.URL(sv);
-    if (u.searchParams && typeof u.searchParams.has === 'function' && u.searchParams.has('__hzpv')) {
-      u.searchParams.delete('__hzpv');
-      return u.href;
-    }
+    return hzpDelQuery(String(sv), '__hzpv');
   } catch (e) {}
   return sv;
 }
@@ -887,7 +956,9 @@ function toProxy(v) {
     if (p !== 'http:' && p !== 'https:' && p !== 'ws:' && p !== 'wss:') return s;
     if (abs.origin === PROXY_ORIGIN) return abs.href;
     if (p === 'ws:' || p === 'wss:') {
-      return PROXY_ORIGIN + '/' + (p === 'wss:' ? 'wss' : 'ws') + '/' + abs.host + abs.pathname + abs.search;
+      var wsProxied = PROXY_ORIGIN + '/' + (p === 'wss:' ? 'wss' : 'ws') + '/' + abs.host + abs.pathname + abs.search;
+      if (REAL_ORIGIN) wsProxied = hzpAddQuery(wsProxied, '__hzpo=' + encodeURIComponent(REAL_ORIGIN));
+      return wsProxied;
     }
         return PROXY_ORIGIN + '/' + verUrl(abs.href);
   } catch (e) { return v; }
@@ -1195,7 +1266,8 @@ function buildLocObj() {
 }
 (function () {
   try {
-    if (getPd(self, '__hzpLocObj')) return;
+    var exLoc = getPd(self, '__hzpLocObj');
+    if (exLoc && exLoc.get) return;
     var locObj = buildLocObj();
     def(self, '__hzpLocObj', {
       get: function () { return locObj; },
@@ -1899,7 +1971,7 @@ function hookUrlProperties() {
 
     try {
     makeTrap('Node.prototype.baseURI', {
-      get: function (c) { return currentRealUrl(); }
+      get: function (c) { try { return REAL_BASE || currentRealUrl(); } catch (e) { return currentRealUrl(); } }
     });
   } catch (e) {}
 }
@@ -2002,17 +2074,6 @@ function isWinLike(o) {
 }
 function hookPostMessage() {
   try {
-    makeProxy('window.postMessage', function (ctx) {
-      try {
-        ctx.args[0] = wrapMessageData(ctx.args[0]);
-        if (typeof ctx.args[1] === 'string') ctx.args[1] = '*';
-        else if (ctx.args[1] && typeof ctx.args[1] === 'object') {
-          try { ctx.args[1].targetOrigin = '*'; } catch (e) {}
-        }
-      } catch (e) {}
-    });
-  } catch (e) {}
-  try {
     self.__hzpPMW = function (w) {
       return {
         postMessage: function (a, b, c) {
@@ -2057,6 +2118,23 @@ function hookPostMessage() {
             var d = rawDataGet ? SN.oreflect.call(rawDataGet, c.self, []) : null;
             if (d && typeof d === 'object' && d.$hzp$messagetype === 'window' && typeof d.$hzp$origin === 'string') return d.$hzp$origin;
           } catch (e) {}
+          try {
+            var nat = c.get();
+            if (nat === PROXY_ORIGIN) {
+              var src = c.self ? c.self.source : null;
+              if (src) {
+                var href = null;
+                try { href = src.location.href; } catch (e1) { href = null; }
+                var real = href ? realFrom(href) : null;
+                if (real) {
+                  var ro = null;
+                  try { ro = new SN.URL(real).origin; } catch (e4) { ro = null; }
+                  if (ro) return ro;
+                }
+              }
+            }
+            return nat;
+          } catch (e2) {}
           return c.get();
         }
       });
@@ -2724,7 +2802,6 @@ function hookWindow() {
     } catch (e) { crossTop = true; }
     if (crossTop) {
       try { SN.od(self, 'top', { get: function () { return self; }, configurable: true }); } catch (e) {}
-      try { SN.od(self, 'parent', { get: function () { return self; }, configurable: true }); } catch (e) {}
     }
   } catch (e) {}
 
@@ -3028,8 +3105,8 @@ function bootUrlSync() {
       if (d && d.type === 'hzp-subscribe') {
         subscribedOrigins.add(e.origin);
         try {
-          if (SN.rawPost) SN.oreflect.call(SN.rawPost, e.source, [{ type: 'hzp-subscribed' }, e.origin]);
-          else e.source.postMessage({ type: 'hzp-subscribed' }, e.origin);
+          if (SN.rawPost) SN.oreflect.call(SN.rawPost, e.source, [{ type: 'hzp-subscribed' }, '*']);
+          else e.source.postMessage({ type: 'hzp-subscribed' }, '*');
         } catch (_) {}
         reportUrlNow();
       }
@@ -3235,21 +3312,19 @@ async function handleRequest(request, env, ctx, pathOverride) {
 
     var upgrade = (request.headers.get('upgrade') || '').toLowerCase();
   if (upgrade === 'websocket' && request.method === 'GET' && HZP.WEB_SOCKET) {
+    var wsOriginHint = '';
+    try { wsOriginHint = url.searchParams.get('__hzpo') || ''; } catch (e) {}
     var wsTarget = parseUniversalURL(pathname, url.search);
+    if (wsTarget) wsTarget = delQueryParam(wsTarget, '__hzpo');
     wsTarget = wsTarget ? wsTarget.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:') : null;
     if (wsTarget && (wsTarget.indexOf('ws://') === 0 || wsTarget.indexOf('wss://') === 0)) {
-      return handleWebSocketProxy(request, wsTarget);
+      return handleWebSocketProxy(request, wsTarget, wsOriginHint);
     }
   }
 
   var targetURL = parseUniversalURL(pathname, url.search, url.hash);
   if (!targetURL) return new Response('Invalid URL', { status: 400 });
-  if (targetURL.indexOf('__hzpv=') !== -1) {
-    try {
-      var tu = new URL(targetURL);
-      if (tu.searchParams.has('__hzpv')) { tu.searchParams.delete('__hzpv'); targetURL = tu.href; }
-    } catch (e) {}
-  }
+  if (targetURL.indexOf('__hzpv=') !== -1) targetURL = delQueryParam(targetURL, '__hzpv');
   var wrappedFix = normalizeWrappedUrl(targetURL);
   if (wrappedFix) return Response.redirect(new URL('/' + wrappedFix, url.origin).href, 302);
   var targetURLObject;
@@ -3277,6 +3352,11 @@ async function handleRequest(request, env, ctx, pathOverride) {
   if (chUa) fwdHeaders.set('sec-ch-ua', deHeadless(chUa, 'Google Chrome'));
   var chUaFull = fwdHeaders.get('sec-ch-ua-full-version-list');
   if (chUaFull) fwdHeaders.set('sec-ch-ua-full-version-list', deHeadless(chUaFull, 'Google Chrome'));
+  [].concat(Array.from(fwdHeaders.keys())).forEach(function (n) {
+    if (n.indexOf('sec-ch-ua-') !== 0) return;
+    var hv = (fwdHeaders.get(n) || '').trim();
+    if (hv === '' || /^"+$/.test(hv)) fwdHeaders.delete(n);
+  });
   ['Host', 'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-worker',
    'x-forwarded-proto', 'x-forwarded-for', 'x-forwarded-host', 'x-real-ip'].forEach(function (n) { fwdHeaders.delete(n); });
 
@@ -3337,7 +3417,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
   }
 
   var secureCk = url.protocol === 'https:' || url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]';
-  var fetchOpts = { method: request.method, headers: fwdHeaders, redirect: 'follow' };
+  var fetchOpts = { method: request.method, headers: fwdHeaders, redirect: 'manual' };
   if (request.method !== 'GET' && request.method !== 'HEAD') {
     var bodyBytes = null;
     try { bodyBytes = await request.arrayBuffer(); }
@@ -3351,6 +3431,11 @@ async function handleRequest(request, env, ctx, pathOverride) {
   var resp;
   try { resp = await fetch(targetURL, fetchOpts); }
   catch (err) { return new Response('Failed to fetch: ' + (err.message || err), { status: 502 }); }
+
+  if (resp.status >= 300 && resp.status < 400) {
+    var redirH = passThroughHeaders(resp, host, url.origin, secureCk);
+    return new Response(null, { status: resp.status, statusText: resp.statusText, headers: redirH });
+  }
 
   if (request.method === 'GET' && resp.status === 200 && isHtmlContentType(resp.headers.get('Content-Type') || '')) {
     var wantJson = false;
@@ -3391,19 +3476,37 @@ async function handleRequest(request, env, ctx, pathOverride) {
   var contentType = resp.headers.get('Content-Type') || '';
 
     if (isHtmlContentType(contentType)) {
+    var challengePage = false;
+    try { challengePage = targetURLObject.pathname.indexOf('/cdn-cgi/challenge-platform/') === 0; } catch (e) {}
+    if (String(resp.headers.get('cf-mitigated') || '') === 'challenge') challengePage = true;
     var html;
     try { html = await resp.text(); }
     catch (e) { return new Response('Failed to read response: ' + (e.message || e), { status: 502 }); }
+    html = forceFullReferrer(html);
 
     var realBase, realOrigin;
     try { var ru = new URL(resp.url); realBase = ru.href; realOrigin = ru.origin; }
     catch (e) { realBase = ''; realOrigin = ''; }
     var proxyOrigin = url.origin;
 
+    if (realBase) {
+      try {
+        var bm = /<base\b[^>]*>/i.exec(html);
+        if (bm) {
+          var hm = /\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(bm[0]);
+          var bh = hm ? String(hm[2] !== undefined ? hm[2] : (hm[3] !== undefined ? hm[3] : (hm[4] || ''))) : '';
+          if (bh) {
+            var absBase = new URL(bh, realBase);
+            if (absBase.protocol === 'http:' || absBase.protocol === 'https:') realBase = absBase.href;
+          }
+        }
+      } catch (e) {}
+    }
+
     html = rewriteInlineScripts(html, realBase, proxyOrigin);
     var head = '';
     if (realBase) head += '<base href="' + escapeHtmlAttr(realBase) + '">';
-    if (HZP.AD_BLOCK) head += '<style>' + heavyAdCss() + '</style>' + AD_BLOCK_CLIENT;
+    if (HZP.AD_BLOCK && !challengePage) head += '<style>' + heavyAdCss() + '</style>' + AD_BLOCK_CLIENT;
     head += buildClientScript(realBase, realOrigin);
     html = injectInHead(html, head);
 
@@ -3411,6 +3514,10 @@ async function handleRequest(request, env, ctx, pathOverride) {
     outHeaders.set('Content-Type', 'text/html; charset=utf-8');
     outHeaders.set('Access-Control-Allow-Origin', '*');
     stripSecurityHeaders(outHeaders);
+    outHeaders.set('Referrer-Policy', 'unsafe-url');
+    if ((navDest === 'iframe' || navDest === 'frame') && !challengePage) {
+      outHeaders.set('Content-Security-Policy', 'sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-presentation allow-orientation-lock allow-storage-access-by-user-activation allow-top-navigation-by-user-activation; frame-ancestors *');
+    }
     if (HZP.CROSS_ORIGIN_ISOLATION) {
       outHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
       outHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless');
@@ -3449,7 +3556,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
       var js = await resp.text();
       try { js = rewriteJsSource(js, new URL(resp.url).href, url.origin); }
       catch (e) { js = rewriteJsSource(js, resp.url, url.origin); }
-      if (js.indexOf('__hzpLoc(') !== -1 || js.indexOf('__hzpLocObj') !== -1 || js.indexOf('__hzpPMW(') !== -1) js = REWRITE_GUARD + js;
+      if (js.indexOf('__hzpLoc(') !== -1 || js.indexOf('__hzpLocObj') !== -1 || js.indexOf('__hzpPMW(') !== -1) js = withRewriteGuard(js);
       passH.set('Cache-Control', 'public, max-age=86400');
       return new Response(js, { status: resp.status, statusText: resp.statusText, headers: passH });
     } catch (e) {
@@ -3524,24 +3631,77 @@ function passThroughHeaders(resp, host, proxyOrigin, secureAttr) {
   return h;
 }
 
-function handleWebSocketProxy(request, targetURL) {
+async function handleWebSocketProxy(request, targetURL, originHint) {
   var protocol = request.headers.get('sec-websocket-protocol') || '';
-  var upstream;
-  try {
-    upstream = new WebSocket(targetURL, protocol || undefined);
-  } catch (e) {
-    return new Response('WebSocket upstream failed: ' + (e.message || e), { status: 502 });
-  }
   var pair = new WebSocketPair();
   var clientSock = pair[0], serverSock = pair[1];
-  upstream.addEventListener('open', function () { try { serverSock.accept(); } catch (e) {} });
+  var upstream = null;
+  var negotiated = protocol;
+  var realOrigin = '';
+  try { realOrigin = String(originHint || ''); } catch (e) { realOrigin = ''; }
+  if (!realOrigin) {
+    try {
+      var ref = request.headers.get('referer') || '';
+      if (ref) {
+        var refU = new URL(ref);
+        var ownU = new URL(request.url);
+        if (refU.origin === ownU.origin) {
+          var realRef = parseUniversalURL(refU.pathname, refU.search, refU.hash);
+          if (realRef) realOrigin = new URL(realRef).origin;
+        } else if (refU.protocol === 'http:' || refU.protocol === 'https:') {
+          realOrigin = refU.origin;
+        }
+      }
+    } catch (e) { realOrigin = ''; }
+  }
+  if (!realOrigin) {
+    try {
+      var tu = new URL(targetURL);
+      realOrigin = (tu.protocol === 'wss:' ? 'https:' : 'http:') + '//' + tu.host;
+    } catch (e) {}
+  }
+  var upUrl = targetURL.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:');
+  var upHeaders = new Headers();
+  upHeaders.set('Upgrade', 'websocket');
+  upHeaders.set('Connection', 'Upgrade');
+  upHeaders.set('Sec-WebSocket-Version', '13');
+  try {
+    var keyBytes = new Uint8Array(16);
+    crypto.getRandomValues(keyBytes);
+    var keyStr = '';
+    for (var ki = 0; ki < keyBytes.length; ki++) keyStr += String.fromCharCode(keyBytes[ki]);
+    upHeaders.set('Sec-WebSocket-Key', btoa(keyStr));
+  } catch (e) {
+    upHeaders.set('Sec-WebSocket-Key', 'dGhlIHNhbXBsZSBub25jZQ==');
+  }
+  if (protocol) upHeaders.set('Sec-WebSocket-Protocol', protocol);
+  if (realOrigin) upHeaders.set('Origin', realOrigin);
+  var ua = request.headers.get('user-agent');
+  if (ua) upHeaders.set('User-Agent', ua);
+  try {
+    var upResp = await fetch(upUrl, { method: 'GET', headers: upHeaders });
+    if (upResp.status === 101 && upResp.webSocket) {
+      upstream = upResp.webSocket;
+      negotiated = upResp.headers.get('sec-websocket-protocol') || protocol;
+    }
+  } catch (e) {}
+  if (!upstream) {
+    try { upstream = new WebSocket(targetURL, protocol || undefined); }
+    catch (e) { return new Response('WebSocket upstream failed: ' + (e.message || e), { status: 502 }); }
+    upstream.addEventListener('open', function () { try { serverSock.accept(); } catch (e) {} });
+  } else {
+    try { upstream.accept(); } catch (e) {}
+    try { serverSock.accept(); } catch (e) {}
+  }
+  try { upstream.binaryType = 'arraybuffer'; } catch (e) {}
+  try { serverSock.binaryType = 'arraybuffer'; } catch (e) {}
   upstream.addEventListener('message', function (ev) { try { serverSock.send(ev.data); } catch (e) {} });
   upstream.addEventListener('close', function (ev) { try { serverSock.close(ev.code || 1000, ev.reason || ''); } catch (e) {} });
   upstream.addEventListener('error', function () { try { serverSock.close(1011, 'upstream error'); } catch (e) {} });
   serverSock.addEventListener('message', function (ev) { try { upstream.send(ev.data); } catch (e) {} });
   serverSock.addEventListener('close', function (ev) { try { upstream.close(ev.code || 1000, ev.reason || ''); } catch (e) {} });
   var h = new Headers();
-  if (protocol) h.set('Sec-WebSocket-Protocol', protocol);
+  if (negotiated) h.set('Sec-WebSocket-Protocol', negotiated);
   return new Response(null, { status: 101, webSocket: clientSock, headers: h });
 }
 
