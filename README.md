@@ -1,4 +1,4 @@
-# HyperZProxy 0.2-Beta
+# HyperZProxy 0.3-Beta
 
 A simple public proxy for bypassing CORS restrictions on websites.
 
