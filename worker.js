@@ -4,7 +4,7 @@ var HZP = {
   CACHE_ASSETS: true,
   COOKIE_ISOLATION: true,
   CROSS_ORIGIN_ISOLATION: true,
-  CLIENT_VERSION: 27,
+  CLIENT_VERSION: 38,
   UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 };
 
@@ -34,6 +34,7 @@ var AD_PATTERNS = [
   'adnxs.com', 'advertising.com', 'outbrain.com', 'taboola.com',
   'criteo.com', 'pubmatic.com', 'rubiconproject.com', 'openx.net',
   'adsafeprotected.com', 'moatads.com', 'scorecardresearch.com',
+  'html-load.cc', 'intergient.com',
   '/ads/', '/ad/', '/advert/', '/advertisement/', '/adsense/',
   '/adserver/', '/analytics/', 'prebid'
 ];
@@ -209,17 +210,37 @@ function isCssContentType(ct) {
 }
 
 
+function cookieDomainAllowed(host, domain) {
+  if (!host || !domain) return false;
+  host = String(host).toLowerCase();
+  domain = String(domain).toLowerCase().replace(/^\.+/, '').replace(/^"+|"+$/g, '');
+  if (!domain || domain.indexOf('.') === -1) return false;
+  if (host !== domain && host.slice(-(domain.length + 1)) !== '.' + domain) return false;
+  var labels = domain.split('.');
+  if (labels.length === 2 && labels[1].length === 2 && /^(co|com|net|org|gov|edu|ac|or|ne|go)$/.test(labels[0])) return false;
+  return true;
+}
 function encodeRequestCookie(cookieHeader, host) {
   if (!cookieHeader || !host) return null;
   var out = [], parts = cookieHeader.split(';');
-  var prefix = 'hz-' + host + ':';
+  var lowerHost = String(host).toLowerCase();
   for (var i = 0; i < parts.length; i++) {
     var p = parts[i].trim();
     if (!p) continue;
     var eq = p.indexOf('=');
     var name = eq === -1 ? p : p.slice(0, eq);
-    if (name.indexOf(prefix) !== 0) continue;
-    out.push(name.slice(prefix.length) + (eq === -1 ? '' : '=' + p.slice(eq + 1)));
+    if (name.indexOf('hz-') !== 0) continue;
+    var colon = name.indexOf(':', 3);
+    if (colon === -1) continue;
+    var ckHost = name.slice(3, colon);
+    var isDomain = ckHost.charAt(0) === '.';
+    var ckDomain = isDomain ? ckHost.slice(1).toLowerCase() : ckHost.toLowerCase();
+    if (!ckDomain) continue;
+    var match = isDomain
+      ? (lowerHost === ckDomain || lowerHost.slice(-(ckDomain.length + 1)) === '.' + ckDomain)
+      : (lowerHost === ckDomain);
+    if (!match) continue;
+    out.push(name.slice(colon + 1) + (eq === -1 ? '' : '=' + p.slice(eq + 1)));
   }
   return out.length ? out.join('; ') : null;
 }
@@ -229,7 +250,17 @@ function rewriteSetCookie(c, host, secureAttr) {
   if (eq === -1) return c;
   var name = c.slice(0, eq);
   var rest = c.slice(eq);
-  var prefixed = 'hz-' + host + ':' + name + rest;
+  var domainMatch = /;\s*domain\s*=\s*([^;]*)/i.exec(c);
+  var cookieHost = host;
+  var domainCookie = false;
+  if (domainMatch) {
+    var domainRaw = String(domainMatch[1] || '').trim().replace(/^"+|"+$/g, '');
+    if (cookieDomainAllowed(host, domainRaw)) {
+      cookieHost = domainRaw.toLowerCase().replace(/^\.+/, '');
+      domainCookie = true;
+    }
+  }
+  var prefixed = (domainCookie ? 'hz-.' + cookieHost : 'hz-' + cookieHost) + ':' + name + rest;
   prefixed = prefixed.replace(/;\s*[Dd]omain\s*=[^;]*/g, '');
   if (/;\s*[Pp]ath\s*=/.test(prefixed)) prefixed = prefixed.replace(/;\s*[Pp]ath\s*=[^;]*/g, '; Path=/');
   else prefixed += '; Path=/';
@@ -608,8 +639,85 @@ var JS_PATTERNS = [
     pre: true,
     re: /(^|[^\w$."'`#])((?!super\b)[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\?\.postMessage(\s*\()/g,
     make: function (m, pre, obj, paren) { return pre + 'globalThis.__hzpPMW(' + obj + ').postMessage' + paren; }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$."'`#])import\.meta(?![\w$])/g,
+    make: function (m, pre) { return pre + '__hzpMeta'; }
+  },
+  {
+    pre: true,
+    re: /(^|[^\w$."'`#])import(\s*)\((\s*)(?!\))/g,
+    make: function (m, pre, ws1, ws2, rb) { return pre + '__hzpi(' + JSON.stringify(rb) + ', '; },
+    skip: function (js, m) {
+      var open = js.indexOf('(', m.index + 6);
+      if (open < 0) return false;
+      var close = hzFindMatchingParen(js, open);
+      if (close < 0) return false;
+      var k = close + 1;
+      while (k < js.length && /\s/.test(js.charAt(k))) k++;
+      return js.charAt(k) === '{';
+    }
   }
 ];
+function hzFindMatchingParen(js, open) {
+  var depth = 0;
+  var i = open;
+  while (i < js.length) {
+    var c = js.charAt(i);
+    if (c === '"' || c === "'" || c === '`') {
+      var q = c;
+      i++;
+      while (i < js.length) {
+        var d = js.charAt(i);
+        if (d === '\\') { i += 2; continue; }
+        if (d === q) { i++; break; }
+        i++;
+      }
+      continue;
+    }
+    if (c === '/' && js.charAt(i + 1) === '/') {
+      i += 2;
+      while (i < js.length && js.charAt(i) !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && js.charAt(i + 1) === '*') {
+      i += 2;
+      while (i < js.length && !(js.charAt(i) === '*' && js.charAt(i + 1) === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '(') depth++;
+    else if (c === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+function hzImportHelpersSrc(rb, po) {
+  return 'var __hzpMeta={url:' + JSON.stringify(rb) + ',resolve:function(s){try{return new globalThis.URL(s,__hzpMeta.url).href;}catch(e){return s;}}};' +
+    'function __hzpi(base,u,opts){try{var s=globalThis.String(u==null?"":u);' +
+    'if(s&&/^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|\\/|\\.{1,2}\\/)/.test(s)){' +
+    'var a=new globalThis.URL(s,base||undefined);' +
+    'if((a.protocol==="http:"||a.protocol==="https:")&&a.origin!==' + JSON.stringify(po) + '){' +
+    'return import(' + JSON.stringify(po) + '+"/"+a.href,opts);}}}catch(e){}return import(u,opts);}';
+}
+function prependJsHelpers(js, rb, po) {
+  var at = 0, pos = 0;
+  for (;;) {
+    var ws = /^(?:\s+|\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/.exec(js.slice(pos));
+    if (!ws || !ws[0]) break;
+    pos += ws[0].length;
+    var dm = /^(["'])(?:[^"'\\]|\\.)*\1\s*;?/.exec(js.slice(pos));
+    if (!dm) break;
+    pos += dm[0].length;
+    at = pos;
+  }
+  return js.slice(0, at) + hzImportHelpersSrc(rb, po) + js.slice(at);
+}
 
 function rewriteJsSource(js, realBase, proxyOrigin) {
   var rb = realBase || '', po = proxyOrigin || '';
@@ -622,6 +730,7 @@ function rewriteJsSource(js, realBase, proxyOrigin) {
       if (m[0].length === 0) { re.lastIndex++; continue; }
       var rep = pat.make.apply(null, [m[0]].concat(Array.prototype.slice.call(m, 1)).concat([rb, po]));
       if (rep === m[0]) continue;
+      if (pat.skip && pat.skip(js, m)) continue;
       var coreStart = pat.pre ? m.index + String(m[1] || '').length : m.index;
       edits.push({ start: m.index, end: m.index + m[0].length, core: coreStart, rep: rep, pat: p });
     }
@@ -640,6 +749,7 @@ function rewriteJsSource(js, realBase, proxyOrigin) {
     pos = ed.end;
   }
   out += js.slice(pos);
+  if (out.indexOf('__hzpMeta') !== -1 || out.indexOf('__hzpi(') !== -1) out = prependJsHelpers(out, rb, po);
   return out;
 }
 
@@ -743,6 +853,7 @@ function stripSecurityHeaders(h) {
   h.delete('X-Powered-By');
   h.delete('X-XSS-Protection');
   h.delete('Clear-Site-Data');
+  h.delete('Alt-Svc');
 }
 
 function escapeHtmlAttr(s) {
@@ -1198,7 +1309,9 @@ self.__hzpLoc = function (p) {
 
 function navigate(rawUrl, replace) {
   try {
-    var abs = resolveUrl(rawUrl, currentRealUrl());
+    var rawStr = rawUrl == null ? '' : String(rawUrl);
+    if (/^\[object [A-Za-z]+\]$/.test(rawStr)) return;
+    var abs = resolveUrl(rawStr, currentRealUrl());
     if (!abs) {
       try {
         var hs = PRISTINE_LOC.href;
@@ -1414,10 +1527,27 @@ function hookLocationFor(w) {
 
 var frameWatched = new SN.WeakSet();
 
-function installFrameWindow(w) {
+function frameNeedsInstall(w, el) {
+  try {
+    if (!w || w === self) return false;
+    if (el && el.getAttribute) {
+      var src = String(el.getAttribute('src') || '').trim();
+      if (src && src.toLowerCase() !== 'about:blank') return true;
+      if (el.getAttribute('srcdoc')) return true;
+    }
+    try {
+      var u = String((w.document && w.document.URL) || '');
+      if (u && u !== 'about:blank') return true;
+    } catch (e) { return true; }
+    return false;
+  } catch (e) { return true; }
+}
+
+function installFrameWindow(w, el) {
   try {
     if (!w || w === self) return;
     if (w.HZP) return;
+    if (!frameNeedsInstall(w, el)) return;
     hookHistoryFor(w);
     hookLocationFor(w);
   } catch (e) {}
@@ -1425,32 +1555,51 @@ function installFrameWindow(w) {
 
 function attachFrameWatch(f) {
   try {
-    installFrameWindow(f.contentWindow);
+    var w = null;
+    try { w = f.contentWindow; } catch (e) {}
+    installFrameWindow(w, f);
+    if (w) { try { hookHistoryFor(w); } catch (e) {} }
     if (frameWatched.has(f)) return;
     frameWatched.add(f);
     f.addEventListener('load', function () {
-      try { installFrameWindow(f.contentWindow); } catch (e) {}
+      try {
+        var lw = f.contentWindow;
+        installFrameWindow(lw, f);
+        if (lw) hookHistoryFor(lw);
+      } catch (e) {}
+    });
+  } catch (e) {}
+}
+
+function hookFrameAppend() {
+  try {
+    var NP = self.Node && self.Node.prototype;
+    if (!NP) return;
+    ['appendChild', 'insertBefore'].forEach(function (m) {
+      var orig = NP[m];
+      if (typeof orig !== 'function' || orig.__hzpFrameAppend) return;
+      var wrapper = function (node) {
+        var ret = SN.oreflect.apply(orig, this, arguments);
+        try {
+          if (node && node.nodeType === 1) {
+            var tag = String(node.tagName || '').toLowerCase();
+            if (tag === 'iframe' || tag === 'frame') attachFrameWatch(node);
+            else if (node.querySelectorAll) {
+              var inner = node.querySelectorAll('iframe, frame');
+              for (var i = 0; i < inner.length; i++) attachFrameWatch(inner[i]);
+            }
+          }
+        } catch (e) {}
+        return ret;
+      };
+      def(wrapper, '__hzpFrameAppend', { value: true, writable: false, configurable: true, enumerable: false });
+      def(NP, m, { value: wrapper, writable: true, configurable: true, enumerable: false });
     });
   } catch (e) {}
 }
 
 function hookFrameWindowAccess() {
   try {
-    var IFP = self.HTMLIFrameElement && self.HTMLIFrameElement.prototype;
-    if (IFP) {
-      var cw = SN.oget(IFP, 'contentWindow');
-      if (cw && cw.get && !IFP.__hzpCW) {
-        def(IFP, '__hzpCW', { value: true, writable: false, configurable: true, enumerable: false });
-        def(IFP, 'contentWindow', {
-          get: function () {
-            var w = cw.get.call(this);
-            try { installFrameWindow(w); } catch (e) {}
-            return w;
-          },
-          configurable: true, enumerable: cw.enumerable !== false
-        });
-      }
-    }
     var DP = self.Document && self.Document.prototype;
     if (DP) {
       var dv = SN.oget(DP, 'defaultView');
@@ -1459,7 +1608,7 @@ function hookFrameWindowAccess() {
         def(DP, 'defaultView', {
           get: function () {
             var w = dv.get.call(this);
-            try { if (w !== self) installFrameWindow(w); } catch (e) {}
+            try { if (w !== self) installFrameWindow(w, null); } catch (e) {}
             return w;
           },
           configurable: true, enumerable: dv.enumerable !== false
@@ -1476,12 +1625,13 @@ function scanFrames() {
   } catch (e) {}
   try {
     var fw = self.frames;
-    for (var j = 0; j < fw.length; j++) installFrameWindow(fw[j]);
+    for (var j = 0; j < fw.length; j++) installFrameWindow(fw[j], null);
   } catch (e) {}
 }
 
 function hookFrames() {
   try { hookFrameWindowAccess(); } catch (e) {}
+  try { hookFrameAppend(); } catch (e) {}
   try { scanFrames(); } catch (e) {}
   try {
     var obs = new MutationObserver(function (muts) {
@@ -1761,38 +1911,99 @@ var STRIP_VALUE_ATTRS = { nonce: 1, integrity: 1, csp: 1, credentialless: 1 };
 
 var HTML_URL_ATTR_RE = /(\\s(?:xlink:href|src|href|poster|action|formaction|data|imagesrcset|srcset)\\s*=\\s*)(?:"([^"]*)"|'([^']*)')/gi;
 var HTML_STYLE_ATTR_RE = /(\\sstyle\\s*=\\s*)(?:"([^"]*)"|'([^']*)')/gi;
+function rewriteTagString(tag) {
+  var out = tag.replace(HTML_URL_ATTR_RE, function (m, pre, dq, sq) {
+    var v = dq != null ? dq : sq;
+    if (!v) return m;
+    var t = v.replace(/\\s+/g, '');
+    if (!t || t.charAt(0) === '#' || /^(javascript|data|blob|about|mailto|tel|sms):/i.test(t)) return m;
+    var name = pre.replace(/[\\s=]/g, '');
+    var proxied;
+    try {
+      if (name.indexOf('srcset') !== -1) proxied = srcsetValue(v);
+      else if (realFrom(v)) proxied = v;
+      else proxied = toProxy(v);
+    } catch (e) { return m; }
+    if (proxied == null || proxied === v) return m;
+    var q = dq != null ? '"' : "'";
+    return pre + q + proxied + q + ' ' + HIDDEN + name + '=' + q + v + q;
+  });
+  if (out.indexOf('url(') !== -1) {
+    out = out.replace(HTML_STYLE_ATTR_RE, function (m, pre, dq, sq) {
+      var v = dq != null ? dq : sq;
+      if (!v || v.indexOf('url(') === -1) return m;
+      var rewritten = rewriteCssStr(v);
+      if (rewritten === v) return m;
+      var q = dq != null ? '"' : "'";
+      return pre + q + rewritten + q + ' ' + HIDDEN + 'style=' + q + v + q;
+    });
+  }
+  return out;
+}
+function tagNameOf(tag) {
+  var name = '';
+  var i = 1;
+  if (tag.charAt(i) === '/') i++;
+  while (i < tag.length) {
+    var c = tag.charAt(i);
+    if (!/[a-zA-Z0-9:-]/.test(c)) break;
+    name += c;
+    i++;
+  }
+  return name.toLowerCase();
+}
+function findTagEnd(s, start) {
+  var q = '';
+  for (var i = start; i < s.length; i++) {
+    var c = s.charAt(i);
+    if (q) {
+      if (c === q) q = '';
+    } else if (c === '"' || c === "'") {
+      q = c;
+    } else if (c === '>') {
+      return i;
+    }
+  }
+  return -1;
+}
 function rewriteHtmlString(html) {
   try {
     var s = String(html == null ? '' : html);
     if (!s || s.indexOf('<') === -1) return s;
     if (s.indexOf('src=') === -1 && s.indexOf('href=') === -1 && s.indexOf('srcset') === -1 && s.indexOf('url(') === -1) return s;
-    s = s.replace(HTML_URL_ATTR_RE, function (m, pre, dq, sq) {
-      var v = dq != null ? dq : sq;
-      if (!v) return m;
-      var t = v.replace(/\\s+/g, '');
-      if (!t || t.charAt(0) === '#' || /^(javascript|data|blob|about|mailto|tel|sms):/i.test(t)) return m;
-      var name = pre.replace(/[\\s=]/g, '');
-      var proxied;
-      try {
-        if (name.indexOf('srcset') !== -1) proxied = srcsetValue(v);
-        else if (realFrom(v)) proxied = v;
-        else proxied = toProxy(v);
-      } catch (e) { return m; }
-      if (proxied == null || proxied === v) return m;
-      var q = dq != null ? '"' : "'";
-      return pre + q + proxied + q + ' ' + HIDDEN + name + '=' + q + v + q;
-    });
-    if (s.indexOf('url(') !== -1) {
-      s = s.replace(HTML_STYLE_ATTR_RE, function (m, pre, dq, sq) {
-        var v = dq != null ? dq : sq;
-        if (!v || v.indexOf('url(') === -1) return m;
-        var out = rewriteCssStr(v);
-        if (out === v) return m;
-        var q = dq != null ? '"' : "'";
-        return pre + q + out + q + ' ' + HIDDEN + 'style=' + q + v + q;
-      });
+    var out = '';
+    var low = s.toLowerCase();
+    var i = 0;
+    while (i < s.length) {
+      var lt = s.indexOf('<', i);
+      if (lt < 0) { out += s.slice(i); break; }
+      out += s.slice(i, lt);
+      if (s.substr(lt, 4) === '<!--') {
+        var ce = s.indexOf('-->', lt + 4);
+        if (ce < 0) { out += s.slice(lt); break; }
+        out += s.slice(lt, ce + 3);
+        i = ce + 3;
+        continue;
+      }
+      var te = findTagEnd(s, lt + 1);
+      if (te < 0) { out += s.slice(lt); break; }
+      var tag = s.slice(lt, te + 1);
+      var name = tagNameOf(tag);
+      var closing = tag.charAt(1) === '/';
+      out += rewriteTagString(tag);
+      i = te + 1;
+      if (!closing && (name === 'script' || name === 'style' || name === 'textarea' || name === 'title')) {
+        var close = '</' + name;
+        var end = low.indexOf(close, i);
+        if (end < 0) { out += s.slice(i); break; }
+        out += s.slice(i, end);
+        var cte = findTagEnd(s, end + 1);
+        if (cte < 0) { out += s.slice(end); break; }
+        out += s.slice(end, cte + 1);
+        i = cte + 1;
+      }
     }
-    return s;
+    return out;
   } catch (e) { return html; }
 }
 function hookHtmlStrings() {
@@ -2126,6 +2337,7 @@ function hookPostMessage() {
                 var href = null;
                 try { href = src.location.href; } catch (e1) { href = null; }
                 var real = href ? realFrom(href) : null;
+                if (!real && href && (href.indexOf('http://') === 0 || href.indexOf('https://') === 0)) real = href;
                 if (real) {
                   var ro = null;
                   try { ro = new SN.URL(real).origin; } catch (e4) { ro = null; }
@@ -2192,6 +2404,23 @@ function hookUserAgent() {
 }
 function hookCookies() {
   if (!self.Document) return;
+  function cookieHostMatch(host, ck) {
+    host = String(host).toLowerCase();
+    var isDomain = ck.charAt(0) === '.';
+    var d = (isDomain ? ck.slice(1) : ck).toLowerCase();
+    if (!d) return false;
+    if (isDomain) return host === d || host.slice(-(d.length + 1)) === '.' + d;
+    return host === d;
+  }
+  function cookieDomainOk(host, d) {
+    host = String(host).toLowerCase();
+    d = String(d).toLowerCase().replace(/^\\.+/, '').replace(/^"+|"+$/g, '');
+    if (!d || d.indexOf('.') === -1) return false;
+    if (host !== d && host.slice(-(d.length + 1)) !== '.' + d) return false;
+    var labels = d.split('.');
+    if (labels.length === 2 && labels[1].length === 2 && /^(co|com|net|org|gov|edu|ac|or|ne|go)$/.test(labels[0])) return false;
+    return true;
+  }
   makeTrap('Document.prototype.cookie', {
     get: function (c) {
       try {
@@ -2199,19 +2428,21 @@ function hookCookies() {
         var realHost = '';
         try { realHost = realUrlObj().hostname; } catch (e) {}
         if (!realHost) return raw;
-        var prefix = 'hz-' + realHost + ':';
         var items = raw.split('; ').filter(Boolean);
         var out = [];
         for (var i = 0; i < items.length; i++) {
           var eq = items[i].indexOf('=');
           var name = eq === -1 ? items[i] : items[i].slice(0, eq);
-          if (name.indexOf('hz-') === 0 && name.indexOf(':', 3) !== -1) {
-            var host = name.slice(3, name.indexOf(':', 3));
-            if (host !== realHost) continue;                
-            out.push(name.slice(prefix.length) + (eq === -1 ? '' : '=' + items[i].slice(eq + 1)));
-          } else {
-            out.push(items[i]);
+          if (name.indexOf('hz-') === 0) {
+            var colon = name.indexOf(':', 3);
+            if (colon !== -1) {
+              var ckHost = name.slice(3, colon);
+              if (!cookieHostMatch(realHost, ckHost)) continue;
+              out.push(name.slice(colon + 1) + (eq === -1 ? '' : '=' + items[i].slice(eq + 1)));
+              continue;
+            }
           }
+          out.push(items[i]);
         }
         return out.join('; ');
       } catch (e) { return c.get(); }
@@ -2222,11 +2453,21 @@ function hookCookies() {
         var realHost = '';
         try { realHost = realUrlObj().hostname; } catch (e) {}
         if (!realHost) return c.set(v);
+        var dm = /;\\s*domain\\s*=\\s*([^;]*)/i.exec(v);
+        var cookieHost = realHost;
+        var domainCookie = false;
+        if (dm) {
+          var d = String(dm[1] || '').trim();
+          if (cookieDomainOk(realHost, d)) {
+            cookieHost = d.toLowerCase().replace(/^\\.+/, '').replace(/^"+|"+$/g, '');
+            domainCookie = true;
+          }
+        }
         var cleaned = v.replace(/;\\s*domain=[^;]*/gi, '');
         var eq = cleaned.indexOf('=');
         if (eq > 0) {
           var name = cleaned.slice(0, eq);
-          if (name.indexOf('hz-') !== 0) return c.set('hz-' + realHost + ':' + cleaned);
+          if (name.indexOf('hz-') !== 0) return c.set((domainCookie ? 'hz-.' + cookieHost : 'hz-' + cookieHost) + ':' + cleaned);
         }
         return c.set(cleaned);
       } catch (e) { try { c.set(String(c.value || '').replace(/;\\s*domain=[^;]*/gi, '')); } catch (e2) {} }
@@ -2395,28 +2636,54 @@ function hookCss() {
 }
 
 function hookRequests() {
+  var OrigRequest = self.Request;
   try {
     if (self.fetch) {
       var origFetch = self.fetch;
       if (origFetch.__hzpProxy) return;
       var wrappedFetch = function wrappedFetch(input, init) {
         try {
-          if (input && typeof input === 'object' && self.Request && input instanceof self.Request) {
-            return SN.oreflect.call(origFetch, self, [input, init]);
+          var req = null;
+          if (OrigRequest && input instanceof OrigRequest) req = input;
+          else if (input && typeof input === 'object' && typeof input.url === 'string') req = input;
+          else if (input && typeof input === 'object' && typeof input.href === 'string') {
+            var hrefProxy = toProxy(input.href);
+            if (hrefProxy !== input.href) input = hrefProxy;
           }
-          var url;
-          if (input && typeof input === 'object') {
-            if (typeof input.url === 'string') url = input.url;           
-            else if (typeof input.href === 'string') url = input.href;    
-            else url = null;
-          } else { url = input; }
-          if (typeof url === 'string' && !/^(data|blob|file):/i.test(url)) {
-            var proxied = toProxy(url);
-            if (proxied !== url) {
-              if (typeof input === 'string') input = proxied;
-              else if (self.Request && input instanceof self.Request) input = new self.Request(proxied, input);
-              else input = proxied;
+          if (req) {
+            var reqUrl = toProxy(req.url);
+            if (reqUrl !== req.url) {
+              if (req.method === 'GET' || req.method === 'HEAD') {
+                try { input = new OrigRequest(reqUrl, req); } catch (e) {}
+              } else {
+                var clone = null;
+                try { clone = req.clone(); } catch (e) {}
+                if (clone) {
+                  return clone.arrayBuffer().then(function (body) {
+                    var opts = {
+                      method: req.method,
+                      headers: req.headers,
+                      body: body,
+                      mode: req.mode,
+                      credentials: req.credentials,
+                      cache: req.cache,
+                      redirect: req.redirect,
+                      referrer: req.referrer,
+                      referrerPolicy: req.referrerPolicy,
+                      integrity: req.integrity,
+                      keepalive: req.keepalive,
+                      signal: req.signal
+                    };
+                    return SN.oreflect.call(origFetch, self, [new OrigRequest(reqUrl, opts), init]);
+                  }).catch(function () {
+                    return SN.oreflect.call(origFetch, self, [input, init]);
+                  });
+                }
+              }
             }
+          } else if (typeof input === 'string' && !/^(data|blob|file):/i.test(input)) {
+            var proxied = toProxy(input);
+            if (proxied !== input) input = proxied;
           }
         } catch (e) {}
         return SN.oreflect.call(origFetch, self, [input, init]);
@@ -2426,12 +2693,10 @@ function hookRequests() {
     }
   } catch (e) {}
   try {
-    if (self.Request) {
+    if (OrigRequest) {
       makeProxy('Request', function (ctx) {
         try {
-          var target = ctx.args[0];
-          var url = (target && typeof target === 'object' && target.url) ? target.url : target;
-          if (typeof url === 'string') ctx.args[0] = toProxy(url);
+          if (typeof ctx.args[0] === 'string') ctx.args[0] = toProxy(ctx.args[0]);
         } catch (e) {}
       });
     }
@@ -2539,30 +2804,42 @@ function hookRequests() {
   } catch (e) {}
   var NATIVE_COU = null;
   var NATIVE_ROU = null;
+  var NATIVE_BLOB = null;
   try {
     if (self.URL && typeof self.URL.createObjectURL === 'function' && typeof self.Blob === 'function') {
       NATIVE_COU = self.URL.createObjectURL;
       NATIVE_ROU = self.URL.revokeObjectURL;
+      NATIVE_BLOB = self.Blob;
       HZ_BLOB_WRAP = new Map();
       HZ_BLOB_REV = new Map();
       HZ_BLOB_DEC = new Set();
       try { self.__hzpNCOU = function (b) { return NATIVE_COU.call(self.URL, b); }; } catch (e) {}
       try {
-        self.URL.createObjectURL = function (blob) {
+        var HZBlob = function (parts, opts) {
           try {
-            var bt = String((blob && blob.type) || '').toLowerCase();
+            var bt = String((opts && opts.type) || '').toLowerCase();
             if (bt.indexOf('javascript') !== -1 || bt.indexOf('ecmascript') !== -1 || bt.indexOf('module') !== -1) {
-              var rurl = NATIVE_COU.call(self.URL, blob);
-              var durl = NATIVE_COU.call(self.URL, new Blob([hzModuleBlobDecider(rurl)], { type: 'text/javascript' }));
-              HZ_BLOB_WRAP.set(rurl, durl);
-              HZ_BLOB_REV.set(durl, rurl);
-              HZ_BLOB_DEC.add(durl);
-              return durl;
+              var arr = null;
+              try { arr = Array.prototype.slice.call(parts); } catch (e0) { arr = null; }
+              if (arr) {
+                var allStr = true;
+                var text = '';
+                for (var i = 0; i < arr.length; i++) {
+                  if (typeof arr[i] === 'string') text += arr[i];
+                  else { allStr = false; break; }
+                }
+                if (allStr) {
+                  var rewritten = hzRewriteModuleSource(text);
+                  if (rewritten !== text) return new NATIVE_BLOB([rewritten], opts);
+                }
+              }
             }
-          } catch (e) {}
-          return NATIVE_COU.apply(self.URL, arguments);
+          } catch (e1) {}
+          return new NATIVE_BLOB(parts, opts);
         };
-      } catch (e) {}
+        HZBlob.prototype = NATIVE_BLOB.prototype;
+        defWithoutError(self, 'Blob', HZBlob);
+      } catch (e2) {}
       try {
         self.URL.revokeObjectURL = function (u) {
           try {
@@ -2574,50 +2851,95 @@ function hookRequests() {
           } catch (e) {}
           return NATIVE_ROU.apply(self.URL, arguments);
         };
-      } catch (e) {}
+      } catch (e3) {}
     }
   } catch (e) {}
 
-  function hzPxSrc() {
-    return 'function px(v){try{var s=String(v==null?"":v);if(!s)return v;if(s.indexOf(PO)===0)return v;' +
+  function hzPxSrc(realOrigin) {
+    return 'var RO=' + JSON.stringify(realOrigin || '') + ';' +
+      'function px(v){try{var s=String(v==null?"":v);if(!s)return v;if(s.indexOf(PO)===0)return v;' +
       'if(/^(mailto:|tel:|sms:|about:|blob:|data:|javascript:)/i.test(s))return v;' +
       'var a=new URL(s,self.location.href);' +
       'if(a.protocol==="http:"||a.protocol==="https:"){if(a.origin===PO)return v;return PO+"/"+a.href;}' +
-      'if(a.protocol==="ws:"||a.protocol==="wss:")return PO+"/"+(a.protocol==="wss:"?"wss":"ws")+"/"+a.host+a.pathname+a.search;' +
+      'if(a.protocol==="ws:"||a.protocol==="wss:"){var wu=PO+"/"+(a.protocol==="wss:"?"wss":"ws")+"/"+a.host+a.pathname+a.search;if(RO)wu+=(wu.indexOf("?")===-1?"?":"&")+"__hzpo="+encodeURIComponent(RO);return wu;}' +
       'return v;}catch(e){return v;}}';
   }
 
-  function hzModuleBlobDecider(realUrl) {
-    return 'var PO=' + JSON.stringify(PROXY_ORIGIN) + ';var R=' + JSON.stringify(realUrl) + ';' +
-      hzPxSrc() +
-      'self.__hzd=1;' +
-      'try{if(typeof self.__hzpClient==="undefined"){' +
-      'try{var f=self.fetch;if(f)self.fetch=function(i,o){try{if(typeof i==="string")i=px(i);else if(i&&typeof i.url==="string"){var p2=px(i.url);if(p2!==i.url)i=new Request(p2,i);}}catch(e){}return f.call(self,i,o);};}catch(e){}' +
-      'try{if(self.XMLHttpRequest){var oo=self.XMLHttpRequest.prototype.open;self.XMLHttpRequest.prototype.open=function(m,u){try{arguments[1]=px(u);}catch(e){}return oo.apply(this,arguments);};}}catch(e){}' +
-      'try{if(self.WebSocket){var OW=self.WebSocket;var NW=function W(u,p){return new OW(px(u),p);};NW.prototype=OW.prototype;self.WebSocket=NW;}}catch(e){}' +
-      '}}catch(e){}' +
-      'var __hzd;' +
-      'export{__hzd as default};' +
-      'try{var t=await (await fetch(R)).text();' +
-      'var BAD="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$."+String.fromCharCode(39)+String.fromCharCode(34);' +
-      'var out="",i2=0;' +
-      'while(true){var j=t.indexOf("import",i2);if(j<0){out+=t.slice(i2);break;}var ok=true;var c0=j>0?t.charAt(j-1):"";if(c0!==""&&BAD.indexOf(c0)>=0)ok=false;var k2=j+6;while(t.charAt(k2)===" ")k2++;if(t.charAt(k2)!=="(")ok=false;if(ok){out+=t.slice(i2,j)+"__hzpi";i2=k2;}else{out+=t.slice(i2,j+6);i2=j+6;}}' +
-      'var pre=out.indexOf("__hzpi")>=0?("var PO="+JSON.stringify(PO)+";function __hzpi(u){return import(__hzpx(u));}var __hzpx="+px.toString()+";"):"";' +
-      'var COU=self.__hzpNCOU;' +
-      'var u2=COU?COU(new Blob([pre+out],{type:"text/javascript"})):URL.createObjectURL(new Blob([pre+out],{type:"text/javascript"}));' +
-      'var m=await import(u2);__hzd=m.default;' +
-      '}catch(e){try{var m2=await import(R);__hzd=m2.default;}catch(e2){}}';
+  function hzFindParen(t, open) {
+    var depth = 0;
+    var i = open;
+    while (i < t.length) {
+      var c = t.charAt(i);
+      if (c === '"' || c === "'" || c === '\`') {
+        var q = c;
+        i++;
+        while (i < t.length) {
+          var d = t.charAt(i);
+          if (d === '\\\\') { i += 2; continue; }
+          if (d === q) { i++; break; }
+          i++;
+        }
+        continue;
+      }
+      if (c === '/' && t.charAt(i + 1) === '/') {
+        i += 2;
+        while (i < t.length && t.charAt(i) !== '\\n') i++;
+        continue;
+      }
+      if (c === '/' && t.charAt(i + 1) === '*') {
+        i += 2;
+        while (i < t.length && !(t.charAt(i) === '*' && t.charAt(i + 1) === '/')) i++;
+        i += 2;
+        continue;
+      }
+      if (c === '(') depth++;
+      else if (c === ')') {
+        depth--;
+        if (depth === 0) return i;
+      }
+      i++;
+    }
+    return -1;
+  }
+
+  function hzRewriteModuleSource(t) {
+    try {
+      var BAD = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$.' + String.fromCharCode(39) + String.fromCharCode(34);
+      var out = '';
+      var i2 = 0;
+      while (true) {
+        var j = t.indexOf('import', i2);
+        if (j < 0) { out += t.slice(i2); break; }
+        var ok = true;
+        var c0 = j > 0 ? t.charAt(j - 1) : '';
+        if (c0 !== '' && BAD.indexOf(c0) >= 0) ok = false;
+        var k2 = j + 6;
+        while (t.charAt(k2) === ' ') k2++;
+        if (t.charAt(k2) !== '(') ok = false;
+        if (ok) {
+          var close = hzFindParen(t, k2);
+          if (close >= 0) {
+            var n = close + 1;
+            while (/\\s/.test(t.charAt(n))) n++;
+            if (t.charAt(n) === '{') ok = false;
+          }
+        }
+        if (ok) { out += t.slice(i2, j) + '__hzpi'; i2 = k2; }
+        else { out += t.slice(i2, j + 6); i2 = j + 6; }
+      }
+      if (out.indexOf('__hzpi') < 0) return t;
+      return 'var PO=' + JSON.stringify(PROXY_ORIGIN) + ';' + hzPxSrc(REAL_ORIGIN) + 'function __hzpi(u){return import(px(u));}' + out;
+    } catch (e) { return t; }
   }
 
   function hzWorkerPatchBody() {
     return '(function(){var PO=' + JSON.stringify(PROXY_ORIGIN) + ';' +
-      hzPxSrc() +
+      hzPxSrc(REAL_ORIGIN) +
       'try{var f=self.fetch;if(f)self.fetch=function(i,o){try{if(typeof i==="string")i=px(i);else if(i&&typeof i.url==="string"){var p2=px(i.url);if(p2!==i.url)i=new Request(p2,i);}}catch(e){}return f.call(self,i,o);};}catch(e){}' +
       'try{if(self.XMLHttpRequest){var oo=self.XMLHttpRequest.prototype.open;self.XMLHttpRequest.prototype.open=function(m,u){try{arguments[1]=px(u);}catch(e){}return oo.apply(this,arguments);};}}catch(e){}' +
       'try{if(self.WebSocket){var OW=self.WebSocket;var NW=function W(u,p){return new OW(px(u),p);};NW.prototype=OW.prototype;self.WebSocket=NW;}}catch(e){}' +
       'try{if(self.EventSource){var OE=self.EventSource;var NE=function E(u,p){return new OE(px(u),p);};NE.prototype=OE.prototype;self.EventSource=NE;}}catch(e){}' +
-      'function hzc(a){try{var s=String(a);if(s.indexOf("blob:")!==0)return px(a);var x=new XMLHttpRequest();x.open("GET",s,false);x.send();var t=String(x.responseText||"");var Q=String.fromCharCode(34);var k=t.indexOf("var R="+Q);if(k>=0&&t.indexOf("__hzd")>=0){var q=t.indexOf(Q,k+7);if(q>k)return t.slice(k+7,q);}}catch(e){}return px(a);}' +
-      'try{var ois=self.importScripts;if(ois)self.importScripts=function(){var a=[];for(var i=0;i<arguments.length;i++)a.push(hzc(arguments[i]));return ois.apply(self,a);};}catch(e){}' +
+      'try{var ois=self.importScripts;if(ois)self.importScripts=function(){var a=[];for(var i=0;i<arguments.length;i++){var s=String(arguments[i]);a.push(s.indexOf("blob:")===0?s:px(s));}return ois.apply(self,a);};}catch(e){}' +
       'self.__hzpWorkerProxy=px;})()';
   }
 
@@ -3423,6 +3745,21 @@ async function handleRequest(request, env, ctx, pathOverride) {
     try { bodyBytes = await request.arrayBuffer(); }
     catch (e) { return new Response('Failed to read request body: ' + (e.message || e), { status: 400 }); }
     if (bodyBytes && bodyBytes.byteLength > 0) {
+      try {
+        if (refReal && /(^|\.)token\.awswaf\.com$/i.test(targetURLObject.hostname) && /\/mp_verify$/.test(targetURLObject.pathname)) {
+          var wafRealHost = '';
+          try { wafRealHost = new URL(refReal).hostname; } catch (e0) {}
+          if (wafRealHost) {
+            var wafBody = new TextDecoder().decode(bodyBytes);
+            var wafProxies = ['"domain":"' + url.host + '"', '"domain":"' + url.hostname + '"'];
+            var wafPatched = wafBody;
+            for (var wi = 0; wi < wafProxies.length; wi++) {
+              if (wafPatched.indexOf(wafProxies[wi]) !== -1) wafPatched = wafPatched.split(wafProxies[wi]).join('"domain":"' + wafRealHost + '"');
+            }
+            if (wafPatched !== wafBody) bodyBytes = new TextEncoder().encode(wafPatched);
+          }
+        }
+      } catch (e1) {}
       fwdHeaders.delete('Content-Length');
       fwdHeaders.delete('Transfer-Encoding');
       fetchOpts.body = bodyBytes;
@@ -3587,11 +3924,11 @@ async function handleRequest(request, env, ctx, pathOverride) {
     }
   }
 
-    var streamH = passThroughHeaders(resp, host, url.origin, secureCk);
+    var streamH = passThroughHeaders(resp, host, url.origin, secureCk, true);
   var isCacheable = false;
   if (HZP.CACHE_ASSETS && request.method === 'GET' && resp.status === 200 && !streamH.has('Set-Cookie')) {
     var ct = contentType.toLowerCase().split(';')[0].trim();
-    isCacheable = /image\/|font\/|css|javascript|application\/json|application\/xml|\+xml|video\/|audio\//.test(ct) && ct !== '';
+    isCacheable = /image\/|font\/|css|javascript|video\/|audio\//.test(ct) && ct !== '';
   }
   if (isCacheable) {
     try {
@@ -3614,7 +3951,7 @@ function rewriteSetCookieOnHeaders(resp, h, host, secureAttr) {
   cookies.forEach(function (c) { h.append('Set-Cookie', rewriteSetCookie(c, host, secureAttr)); });
 }
 
-function passThroughHeaders(resp, host, proxyOrigin, secureAttr) {
+function passThroughHeaders(resp, host, proxyOrigin, secureAttr, keepEncoding) {
   var h = new Headers(resp.headers);
   h.set('Access-Control-Allow-Origin', '*');
   stripSecurityHeaders(h);
@@ -3624,7 +3961,7 @@ function passThroughHeaders(resp, host, proxyOrigin, secureAttr) {
     h.set('Cross-Origin-Opener-Policy', 'same-origin');
   }
   h.delete('Content-Length');
-  h.delete('Content-Encoding');
+  if (!keepEncoding) h.delete('Content-Encoding');
   h.delete('Transfer-Encoding');
   if (HZP.COOKIE_ISOLATION) rewriteSetCookieOnHeaders(resp, h, host, secureAttr);
   rewriteResponseUrlHeaders(h, resp.url, proxyOrigin);
@@ -3678,20 +4015,18 @@ async function handleWebSocketProxy(request, targetURL, originHint) {
   if (realOrigin) upHeaders.set('Origin', realOrigin);
   var ua = request.headers.get('user-agent');
   if (ua) upHeaders.set('User-Agent', ua);
+  var fromFetch = false;
   try {
     var upResp = await fetch(upUrl, { method: 'GET', headers: upHeaders });
     if (upResp.status === 101 && upResp.webSocket) {
       upstream = upResp.webSocket;
+      fromFetch = true;
       negotiated = upResp.headers.get('sec-websocket-protocol') || protocol;
     }
   } catch (e) {}
   if (!upstream) {
     try { upstream = new WebSocket(targetURL, protocol || undefined); }
     catch (e) { return new Response('WebSocket upstream failed: ' + (e.message || e), { status: 502 }); }
-    upstream.addEventListener('open', function () { try { serverSock.accept(); } catch (e) {} });
-  } else {
-    try { upstream.accept(); } catch (e) {}
-    try { serverSock.accept(); } catch (e) {}
   }
   try { upstream.binaryType = 'arraybuffer'; } catch (e) {}
   try { serverSock.binaryType = 'arraybuffer'; } catch (e) {}
@@ -3700,6 +4035,12 @@ async function handleWebSocketProxy(request, targetURL, originHint) {
   upstream.addEventListener('error', function () { try { serverSock.close(1011, 'upstream error'); } catch (e) {} });
   serverSock.addEventListener('message', function (ev) { try { upstream.send(ev.data); } catch (e) {} });
   serverSock.addEventListener('close', function (ev) { try { upstream.close(ev.code || 1000, ev.reason || ''); } catch (e) {} });
+  if (fromFetch) {
+    try { upstream.accept(); } catch (e) {}
+    try { serverSock.accept(); } catch (e) {}
+  } else {
+    upstream.addEventListener('open', function () { try { serverSock.accept(); } catch (e) {} });
+  }
   var h = new Headers();
   if (negotiated) h.set('Sec-WebSocket-Protocol', negotiated);
   return new Response(null, { status: 101, webSocket: clientSock, headers: h });
