@@ -3853,7 +3853,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
     stripSecurityHeaders(outHeaders);
     outHeaders.set('Referrer-Policy', 'unsafe-url');
     if ((navDest === 'iframe' || navDest === 'frame') && !challengePage) {
-      outHeaders.set('Content-Security-Policy', 'sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-presentation allow-orientation-lock allow-storage-access-by-user-activation allow-top-navigation-by-user-activation; frame-ancestors *');
+      outHeaders.set('Content-Security-Policy', 'sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-presentation allow-orientation-lock allow-storage-access-by-user-activation allow-top-navigation-by-user-activation; frame-ancestors * file:');
     }
     if (HZP.CROSS_ORIGIN_ISOLATION) {
       outHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
