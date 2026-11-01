@@ -10,6 +10,8 @@ Format is: hyperzproxy.z04.workers.dev/urlhere
 
 You're welcome to fork this repository, but please keep the credits in the README.
 
+Vignere Public Encoding String: HyperZHubKey1600
+
 ## Credits
 
 * HyperZTeam
