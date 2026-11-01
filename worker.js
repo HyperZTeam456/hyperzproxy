@@ -574,6 +574,7 @@ function jsProxyUrl(url, quote, realBase, proxyOrigin) {
     if (/^(javascript|mailto|tel|about|data|blob):/i.test(u)) return quote + u + quote;
     var abs = u.indexOf('//') === 0 ? new URL('https:' + u) : new URL(u, realBase);
     if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return quote + u + quote;
+    if (isDirectEmbedHost(abs.href)) return quote + u + quote;
     return quote + proxyOrigin + '/' + verHref(abs.href) + quote;
   } catch (e) { return quote + url + quote; }
 }
@@ -794,6 +795,35 @@ function rewriteInlineScripts(html, realBase, proxyOrigin) {
     if (/\bsrc\s*=/i.test(attrs)) return match;
     if (!content.trim() || !scriptNeedsRewrite(content)) return match;
     return '<script' + attrs + '>' + rewriteJsSource(content, realBase, proxyOrigin) + '</script>';
+  });
+}
+
+function rewriteImportMaps(html, realBase, proxyOrigin) {
+  var po = proxyOrigin || '';
+  if (!po) return html;
+  return html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, function (match, attrs, content) {
+    if (!/\btype\s*=\s*(?:"importmap"|'importmap'|importmap)/i.test(attrs)) return match;
+    var obj = null;
+    try { obj = JSON.parse(content); } catch (e) { return match; }
+    if (!obj || typeof obj !== 'object') return match;
+    var changed = false;
+    function rewriteMap(map) {
+      if (!map || typeof map !== 'object') return;
+      Object.keys(map).forEach(function (k) {
+        var v = map[k];
+        if (typeof v === 'string' && /^https?:\/\//i.test(v) && v.indexOf(po + '/') !== 0) {
+          map[k] = po + '/' + v;
+          changed = true;
+        } else if (v && typeof v === 'object') {
+          rewriteMap(v);
+        }
+      });
+    }
+    rewriteMap(obj.imports);
+    rewriteMap(obj.scopes);
+    if (!changed) return match;
+    try { return '<script' + attrs + '>' + JSON.stringify(obj) + '</script>'; }
+    catch (e) { return match; }
   });
 }
 
@@ -2033,13 +2063,57 @@ function rewriteHtmlString(html) {
   } catch (e) { return html; }
 }
 function hookHtmlStrings() {
+  function hzpIsAuto() {
+    try {
+      if (navigator && navigator.webdriver === true) return true;
+      if (window.cdc_adoQpoasnmao_dc) return true;
+      if (/HeadlessChrome/i.test(String(navigator.userAgent || ''))) return true;
+    } catch (e) {}
+    return false;
+  }
+  var HZP_TAMPER_EVENTS = [];
+  function hzpTamper(ev) {
+    try {
+      var now = Date.now();
+      HZP_TAMPER_EVENTS.push(now);
+      while (HZP_TAMPER_EVENTS.length && now - HZP_TAMPER_EVENTS[0] > 6000) HZP_TAMPER_EVENTS.shift();
+      if (!hzpIsAuto()) return;
+      hzpShieldShow();
+      if (ev === 'write' || ev === 'open') {
+        setTimeout(function () { try { hzpShieldShow(); } catch (e) {} }, 250);
+        setTimeout(function () { try { hzpShieldShow(); } catch (e) {} }, 750);
+      }
+    } catch (e) {}
+  }
+  function hzpShieldShow() {
+    try {
+      if (window.__hzpShield) return;
+      window.__hzpShield = true;
+      var ex = document.getElementById('hzp-inspect-guard');
+      if (ex && ex.parentNode) ex.parentNode.removeChild(ex);
+      var d = document.createElement('div');
+      d.id = 'hzp-inspect-guard';
+      d.style.cssText = 'position:fixed;inset:0;background:#000;z-index:2147483647;';
+      (document.documentElement || document.body || document.documentElement).appendChild(d);
+      setTimeout(function () {
+        try {
+          var el = document.getElementById('hzp-inspect-guard');
+          if (el && el.parentNode) el.parentNode.removeChild(el);
+          window.__hzpShield = false;
+        } catch (e) {}
+      }, 2500);
+    } catch (e) {}
+  }
   try {
     if (self.Element) {
       var ip = getPd(self.Element.prototype, 'innerHTML');
       if (ip && ip.set) {
         def(self.Element.prototype, 'innerHTML', {
           get: ip.get ? function () { try { return ip.get.call(this); } catch (e) { return ''; } } : undefined,
-          set: function (v) { return ip.set.call(this, rewriteHtmlString(v)); },
+          set: function (v) {
+            try { if (this === self.document.documentElement || this === self.document.body || this === self.document.head) hzpTamper('innerHTML'); } catch (e) {}
+            return ip.set.call(this, rewriteHtmlString(v));
+          },
           configurable: true,
           enumerable: ip.enumerable !== false
         });
@@ -2047,7 +2121,10 @@ function hookHtmlStrings() {
         if (op && op.set) {
           def(self.Element.prototype, 'outerHTML', {
             get: op.get ? function () { try { return op.get.call(this); } catch (e) { return ''; } } : undefined,
-            set: function (v) { return op.set.call(this, rewriteHtmlString(v)); },
+            set: function (v) {
+              try { if (this === self.document.documentElement || this === self.document.body) hzpTamper('outerHTML'); } catch (e) {}
+              return op.set.call(this, rewriteHtmlString(v));
+            },
             configurable: true,
             enumerable: op.enumerable !== false
           });
@@ -2096,6 +2173,60 @@ function hookHtmlStrings() {
         }
       } catch (e) {}
     });
+  } catch (e) {}
+  try {
+    var docOp = self.document.open, docWr = self.document.write;
+    self.document.open = function () {
+      try { hzpTamper('open'); } catch (e) {}
+      var out = docOp.apply(this, arguments);
+      try { window.__hzpShield = false; } catch (e) {}
+      return out;
+    };
+    self.document.write = function () {
+      try { hzpTamper('write'); } catch (e) {}
+      var out = docWr.apply(this, arguments);
+      try { window.__hzpShield = false; } catch (e) {}
+      return out;
+    };
+  } catch (e) {}
+  try {
+    if (self.Document && self.Document.prototype) {
+      var DP = self.Document.prototype;
+      var doDesc = Object.getOwnPropertyDescriptor(DP, 'open');
+      var dwDesc = Object.getOwnPropertyDescriptor(DP, 'write');
+      if (doDesc && doDesc.value) {
+        Object.defineProperty(DP, 'open', {
+          configurable: true,
+          value: function () {
+            try { hzpTamper('open'); } catch (e) {}
+            var out = doDesc.value.apply(this, arguments);
+            try { window.__hzpShield = false; } catch (e) {}
+            return out;
+          }
+        });
+      }
+      if (dwDesc && dwDesc.value) {
+        Object.defineProperty(DP, 'write', {
+          configurable: true,
+          value: function () {
+            try { hzpTamper('write'); } catch (e) {}
+            var out = dwDesc.value.apply(this, arguments);
+            try { window.__hzpShield = false; } catch (e) {}
+            return out;
+          }
+        });
+      }
+    }
+  } catch (e) {}
+  try {
+    var savedBody = null, savedRoot = self.document.documentElement;
+    setInterval(function () {
+      try {
+        var b = self.document.body;
+        if (!savedBody && b) savedBody = b;
+        if ((b && b !== savedBody) || self.document.documentElement !== savedRoot) hzpTamper('root');
+      } catch (e) {}
+    }, 800);
   } catch (e) {}
 }
 
@@ -3505,13 +3636,22 @@ function buildClientScript(realBase, realOrigin) {
     .replace('%__HZP_REAL_BASE__%', jsonSafeScript(realBase))
     .replace('%__HZP_REAL_ORIGIN__%', jsonSafeScript(realOrigin))
     .replace('%__HZP_VER__%', String(HZP.CLIENT_VERSION).replace(/[^0-9A-Za-z._-]/g, ''))
-    + '<' + '/script>';
+    + '<' + '/script>'
+    + '<script>(function(){try{var l=globalThis.__hzpLocObj||null;if(!l)return;var host=String(l.hostname||"").toLowerCase();if(host!=="www.crazygames.com")return;var last="";setInterval(function(){try{var p=String(l.pathname||"");if(p===last)return;last=p;if(/^\\/game\\//i.test(p)){var u=String(l.origin||"")+p;try{globalThis.location.replace(u);}catch(e){}}}catch(e){}},250);}catch(e){}})();</script>';
 }
 function jsonSafeScript(v) {
   return JSON.stringify(String(v || '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 }
 
 
+function isDirectEmbedHost(absUrl) {
+  try {
+    var h = new URL(absUrl).hostname.toLowerCase();
+    if (h === 'games.crazygames.com') return true;
+    if (h.indexOf('game-files.crazygames.com', h.length - 27) !== -1) return true;
+  } catch (e) {}
+  return false;
+}
 function attrProxyUrl(v, realBase, proxyOrigin) {
   try {
     if (/^(javascript|data|blob|mailto|tel|about):/i.test(v)) return v;
@@ -3526,6 +3666,7 @@ function attrProxyUrl(v, realBase, proxyOrigin) {
     var p = abs.protocol;
     if (p !== 'http:' && p !== 'https:') return v;
     if (isProxiedPath(abs.pathname)) return v;
+    if (isDirectEmbedHost(abs.href)) return v;
     return proxyOrigin + '/' + verHref(abs.href);
   } catch (e) { return v; }
 }
@@ -3695,6 +3836,13 @@ async function handleRequest(request, env, ctx, pathOverride) {
   var targetURLObject;
   try { targetURLObject = new URL(targetURL); }
   catch (e) { return new Response('Invalid URL', { status: 400 }); }
+  try {
+    var tHost = String(targetURLObject.hostname || '').toLowerCase();
+    var tPath = String(targetURLObject.pathname || '');
+    if ((tHost === 'www.crazygames.com' || tHost === 'games.crazygames.com') && tPath.indexOf('/game/') === 0) {
+      return Response.redirect(targetURLObject.href, 302);
+    }
+  } catch (e) {}
   var navDest = String(request.headers.get('sec-fetch-dest') || '').toLowerCase();
   if (navDest === 'document' || navDest === 'iframe') {
     var navHost = '';
@@ -3884,6 +4032,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
     }
 
     html = rewriteInlineScripts(html, realBase, proxyOrigin);
+    html = rewriteImportMaps(html, realBase, proxyOrigin);
     var head = '';
     if (realBase) head += '<base href="' + escapeHtmlAttr(realBase) + '">';
     if (HZP.AD_BLOCK && !challengePage) head += '<style>' + heavyAdCss() + '</style>' + AD_BLOCK_CLIENT;
