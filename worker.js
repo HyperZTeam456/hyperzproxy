@@ -125,6 +125,32 @@ function decodeUrl(enc) {
   return caesarDecode(raw);
 }
 
+var HZ_VIG_KEY = 'HyperZHubKey1600';
+var HZ_VIG_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+function hzVigShift(s, key, dir) {
+  var A = HZ_VIG_ALPHABET, AL = A.length, out = '', i, ai, ki;
+  for (i = 0; i < s.length; i++) {
+    ai = A.indexOf(s.charAt(i));
+    if (ai < 0) { out += s.charAt(i); continue; }
+    ki = A.indexOf(key.charAt(i % key.length));
+    out += dir ? A[(ai + ki) % AL] : A[(ai - ki + AL) % AL];
+  }
+  return out;
+}
+function hzVigDecodePath(p) {
+  var s = hzVigShift(String(p == null ? '' : p), HZ_VIG_KEY, false);
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  try {
+    var bin = atob(s);
+    try {
+      var u8 = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      return new TextDecoder('utf-8', { fatal: false }).decode(u8);
+    } catch (eD) { return bin; }
+  } catch (e) { return null; }
+}
+
 
 function parseUniversalURL(pathname, search, hash) {
   search = search || ''; hash = hash || '';
@@ -3590,6 +3616,23 @@ function buildHtmlRewriter(realBase, proxyOrigin) {
 async function handleRequest(request, env, ctx, pathOverride) {
   var url = new URL(request.url);
   var pathname = pathOverride != null ? pathOverride : url.pathname;
+
+  if (url.searchParams.get('encode') === 'true') {
+    var encPath = String(pathname).replace(/^\/+/, '');
+    if (encPath) {
+      var decTarget = hzVigDecodePath(encPath);
+      if (!decTarget || !/^https?:\/\//i.test(decTarget)) {
+        return new Response('Invalid URL', { status: 400 });
+      }
+      var encHost = '';
+      try { encHost = new URL(decTarget).hostname; } catch (eH) { encHost = ''; }
+      if (encHost && (/^\d{1,3}(\.\d{1,3}){3}$/.test(encHost) || encHost.charAt(0) === '[')) {
+        return new Response('Invalid URL', { status: 400 });
+      }
+      pathname = '/' + decTarget;
+      url.search = '';
+    }
+  }
 
   if (request.method === 'OPTIONS') {
     return new Response(null, {
