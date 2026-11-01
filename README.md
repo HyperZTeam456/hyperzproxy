@@ -12,6 +12,8 @@ You're welcome to fork this repository, but please keep the credits in the READM
 
 Vignere Public Encoding String: HyperZHubKey1600
 
+Use ?encode=true if the proxy is to be encoded on your site
+
 ## Credits
 
 * HyperZTeam
