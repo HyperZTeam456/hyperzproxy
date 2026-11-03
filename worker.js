@@ -4,7 +4,7 @@ var HZP = {
   CACHE_ASSETS: true,
   COOKIE_ISOLATION: true,
   CROSS_ORIGIN_ISOLATION: true,
-  CLIENT_VERSION: 38,
+  CLIENT_VERSION: 40,
   UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 };
 
@@ -564,9 +564,27 @@ function verHref(href) {
     if (!HZP.CLIENT_VERSION) return href;
     var u = new URL(href);
     if (!/\.m?js$/i.test(u.pathname) && !/\.cjs$/i.test(u.pathname)) return href;
+    if (/\/bundle\.js$/i.test(u.pathname)) return href;
     if (/[?&]__hzpv=/.test(href)) return href;
     return addQueryParam(href, '__hzpv=' + String(HZP.CLIENT_VERSION));
   } catch (e) { return href; }
+}
+function engineProxyOrigin(absUrl, proxyOrigin, realBase) {
+  try {
+    var u = new URL(absUrl);
+    if (/(^|\.)game-files\.crazygames\.com$/i.test(u.hostname)) {
+      if (realBase) {
+        try {
+          var rb = new URL(realBase);
+          if (/(^|\.)game-files\.crazygames\.com$/i.test(rb.hostname)) return null;
+        } catch (e) {}
+      }
+      var po = new URL(proxyOrigin || 'http://127.0.0.1:8800');
+      var eh = po.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+      return po.protocol + '//' + eh + ':' + (po.port || (po.protocol === 'https:' ? '443' : '80'));
+    }
+  } catch (e) {}
+  return null;
 }
 function jsProxyUrl(url, quote, realBase, proxyOrigin) {
   try {
@@ -574,8 +592,8 @@ function jsProxyUrl(url, quote, realBase, proxyOrigin) {
     if (/^(javascript|mailto|tel|about|data|blob):/i.test(u)) return quote + u + quote;
     var abs = u.indexOf('//') === 0 ? new URL('https:' + u) : new URL(u, realBase);
     if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return quote + u + quote;
-    if (isDirectEmbedHost(abs.href)) return quote + u + quote;
-    return quote + proxyOrigin + '/' + verHref(abs.href) + quote;
+    var eo = engineProxyOrigin(abs.href, proxyOrigin, realBase);
+    return quote + (eo || proxyOrigin) + '/' + verHref(abs.href) + quote;
   } catch (e) { return quote + url + quote; }
 }
 function jsWsProxyUrl(url, quote, proxyOrigin, realBase) {
@@ -791,6 +809,9 @@ function scriptNeedsRewrite(src) {
   );
 }
 function rewriteInlineScripts(html, realBase, proxyOrigin) {
+  try {
+    if (realBase && /(^|\.)game-files\.crazygames\.com/i.test(String(new URL(realBase).hostname))) return html;
+  } catch (e) {}
   return html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, function (match, attrs, content) {
     if (/\bsrc\s*=/i.test(attrs)) return match;
     if (!content.trim() || !scriptNeedsRewrite(content)) return match;
@@ -946,6 +967,17 @@ var HZP_CLIENT_SRC = `(function(){
 "use strict";
 if (self.__hzpClient) return;
 self.__hzpClient = 1;
+try {
+  var _HZP_USP = self.URLSearchParams;
+  if (_HZP_USP && _HZP_USP.prototype && !_HZP_USP.prototype.__hzpLocal) {
+    var _hzpUspGet = _HZP_USP.prototype.get;
+    _HZP_USP.prototype.get = function (k) {
+      try { if (String(k) === 'useLocalSdk') return 'true'; } catch (e) {}
+      return _hzpUspGet.call(this, k);
+    };
+    try { _HZP_USP.prototype.__hzpLocal = 1; } catch (e) {}
+  }
+} catch (e) {}
 
 var HIDDEN = 'hz-attr-';
 var REAL_BASE = %__HZP_REAL_BASE__%;
@@ -980,6 +1012,7 @@ function verUrl(h) {
     var s = String(h);
     var u = new SN.URL(s);
     if (!/\\.m?js$/i.test(u.pathname) && !/\\.cjs$/i.test(u.pathname)) return h;
+    if (/\\/bundle\\.js$/i.test(u.pathname)) return h;
     if (/[?&]__hzpv=/.test(s)) return h;
     return hzpAddQuery(s, '__hzpv=' + HZP_VER);
   } catch (e) { return h; }
@@ -1102,6 +1135,19 @@ function unrewriteLinkHeader(value) {
   } catch (e) { return value; }
 }
 
+function hzpEngineOrigin(href) {
+  try {
+    var u = new SN.URL(href, currentRealUrl());
+    var po = new SN.URL(PROXY_ORIGIN);
+    var eh = po.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+    var eo = po.protocol + '//' + eh + ':' + (po.port || (po.protocol === 'https:' ? '443' : '80'));
+    var isEngineDoc = false;
+    try { isEngineDoc = /(^|\\.)game-files\\.crazygames\\.com$/i.test(new SN.URL(REAL_ORIGIN || REAL_BASE || '').hostname); } catch (e) {}
+    if (u.origin === eo) return isEngineDoc ? null : eo;
+    if (/(^|\\.)game-files\\.crazygames\\.com$/i.test(u.hostname)) return isEngineDoc ? null : eo;
+  } catch (e) {}
+  return null;
+}
 function toProxy(v) {
   try {
     if (v == null) return v;
@@ -1122,6 +1168,8 @@ function toProxy(v) {
     if (p === 'javascript:' || p === 'about:' || p === 'data:' || p === 'blob:' || p === 'mailto:' || p === 'tel:') return s;
     if (p !== 'http:' && p !== 'https:' && p !== 'ws:' && p !== 'wss:') return s;
     if (abs.origin === PROXY_ORIGIN) return abs.href;
+    var eo = hzpEngineOrigin(abs.href);
+    if (eo) return abs.origin === eo ? abs.href : (eo + '/' + verUrl(abs.href));
     if (p === 'ws:' || p === 'wss:') {
       var wsProxied = PROXY_ORIGIN + '/' + (p === 'wss:' ? 'wss' : 'ws') + '/' + abs.host + abs.pathname + abs.search;
       if (REAL_ORIGIN) wsProxied = hzpAddQuery(wsProxied, '__hzpo=' + encodeURIComponent(REAL_ORIGIN));
@@ -2251,7 +2299,7 @@ function hookUrlProperties() {
         });
         return;
       }
-      var unproxyRaw = isSrcset ? srcsetUnrewrite : function (raw) {
+      var unproxyRaw = isSrcset ? srcsetUnrewrite : (className === 'HTMLScriptElement' && attr === 'src') ? function (raw) { return raw; } : function (raw) {
         if (!raw) return raw;
         return realFrom(raw) || raw;
       };
@@ -2276,7 +2324,7 @@ function hookUrlProperties() {
     });
   });
 
-    try {
+  try {
     ['HTMLAnchorElement', 'HTMLAreaElement'].forEach(function (cls) {
       var proto = self[cls] && self[cls].prototype;
       if (!proto) return;
@@ -2311,7 +2359,7 @@ function hookUrlProperties() {
     });
   } catch (e) {}
 
-    try {
+  try {
     if (self.HTMLImageElement) {
       makeTrap('HTMLImageElement.prototype.currentSrc', {
         get: function (c) {
@@ -2324,7 +2372,7 @@ function hookUrlProperties() {
     }
   } catch (e) {}
 
-    try {
+  try {
     if (self.SVGAnimatedString) {
       multiTrap(['SVGAnimatedString.prototype.baseVal', 'SVGAnimatedString.prototype.animVal'], {
         get: function (c) {
@@ -2337,7 +2385,7 @@ function hookUrlProperties() {
     }
   } catch (e) {}
 
-    try {
+  try {
     makeTrap('Node.prototype.baseURI', {
       get: function (c) { try { return REAL_BASE || currentRealUrl(); } catch (e) { return currentRealUrl(); } }
     });
@@ -3603,7 +3651,31 @@ function bootUrlSync() {
   } catch (e) {}
 }
 
+function scrubGameframePromo() {
+  try {
+    var gfHost = '';
+    try { gfHost = new SN.URL(REAL_ORIGIN).hostname; } catch (e) {}
+    if (gfHost !== 'games.crazygames.com') return;
+    function kill() {
+      try {
+        var el = document.getElementById('external-playMoreGames-link');
+        if (!el) return;
+        var target = null;
+        try { target = el.closest('[class*="footer"]'); } catch (e) {}
+        (target || el).remove();
+      } catch (e) {}
+    }
+    kill();
+    try {
+      if (self.MutationObserver && document.documentElement) {
+        new MutationObserver(kill).observe(document.documentElement, { childList: true, subtree: true });
+      }
+    } catch (e) {}
+    setInterval(kill, 1000);
+  } catch (e) {}
+}
 function installAllWindows() {
+  try { scrubGameframePromo(); } catch (e) {}
   try { overlayLocation(); } catch (e) {}
   try { hookHistory(); } catch (e) {}
   try { hookElementAttrs(); } catch (e) {}
@@ -3631,13 +3703,22 @@ try { self.HZP = { href: function () { return currentRealUrl(); }, proxy: toProx
 })();
 `;
 
+function buildEngineConfigScript(proxyOrigin) {
+  var eo = JSON.stringify(String(proxyOrigin || ''));
+  return '<script>(function(){var EO=' + eo + ';' +
+    'function rw(o){if(!o||typeof o!=="object")return;for(var k in o){try{var v=o[k];' +
+    'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)){var h="";try{h=new URL(v).hostname}catch(e){}' +
+    'if(/(^|\\.)(game-files|ssl-files|static-files|files)\\.crazygames\\.com$/i.test(h))o[k]=EO+"/"+v;' +
+    '}}catch(e){}}}' +
+    'window.addEventListener("message",function(e){var d=e.data;if(!d||d.type!=="unity2020config")return;rw(d.loaderOptions);rw(d.unityConfig);},true);' +
+    '})();<' + '/script>';
+}
 function buildClientScript(realBase, realOrigin) {
   return '<script>' + HZP_CLIENT_SRC
     .replace('%__HZP_REAL_BASE__%', jsonSafeScript(realBase))
     .replace('%__HZP_REAL_ORIGIN__%', jsonSafeScript(realOrigin))
     .replace('%__HZP_VER__%', String(HZP.CLIENT_VERSION).replace(/[^0-9A-Za-z._-]/g, ''))
-    + '<' + '/script>'
-    + '<script>(function(){try{var l=globalThis.__hzpLocObj||null;if(!l)return;var host=String(l.hostname||"").toLowerCase();if(host!=="www.crazygames.com")return;var last="";setInterval(function(){try{var p=String(l.pathname||"");if(p===last)return;last=p;if(/^\\/game\\//i.test(p)){var u=String(l.origin||"")+p;try{globalThis.location.replace(u);}catch(e){}}}catch(e){}},250);}catch(e){}})();</script>';
+    + '<' + '/script>';
 }
 function jsonSafeScript(v) {
   return JSON.stringify(String(v || '')).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
@@ -3645,11 +3726,6 @@ function jsonSafeScript(v) {
 
 
 function isDirectEmbedHost(absUrl) {
-  try {
-    var h = new URL(absUrl).hostname.toLowerCase();
-    if (h === 'games.crazygames.com') return true;
-    if (h.indexOf('game-files.crazygames.com', h.length - 27) !== -1) return true;
-  } catch (e) {}
   return false;
 }
 function attrProxyUrl(v, realBase, proxyOrigin) {
@@ -3666,7 +3742,8 @@ function attrProxyUrl(v, realBase, proxyOrigin) {
     var p = abs.protocol;
     if (p !== 'http:' && p !== 'https:') return v;
     if (isProxiedPath(abs.pathname)) return v;
-    if (isDirectEmbedHost(abs.href)) return v;
+    var eo = engineProxyOrigin(abs.href, proxyOrigin, realBase);
+    if (eo) return eo + '/' + verHref(abs.href);
     return proxyOrigin + '/' + verHref(abs.href);
   } catch (e) { return v; }
 }
@@ -3815,6 +3892,9 @@ async function handleRequest(request, env, ctx, pathOverride) {
   if (pathname === '/' || pathname === '') {
     return new Response('url not specified', { status: 200, headers: { 'Content-Type': 'text/plain' } });
   }
+  if (pathname === '/favicon.ico') {
+    return new Response(null, { status: 204 });
+  }
 
     var upgrade = (request.headers.get('upgrade') || '').toLowerCase();
   if (upgrade === 'websocket' && request.method === 'GET' && HZP.WEB_SOCKET) {
@@ -3828,6 +3908,10 @@ async function handleRequest(request, env, ctx, pathOverride) {
     }
   }
 
+  if (url.hostname === 'localhost' && String(request.headers.get('sec-fetch-dest') || '').toLowerCase() === 'document') {
+    return Response.redirect(url.protocol + '//127.0.0.1:' + (url.port || (url.protocol === 'https:' ? '443' : '80')) + url.pathname + url.search, 302);
+  }
+
   var targetURL = parseUniversalURL(pathname, url.search, url.hash);
   if (!targetURL) return new Response('Invalid URL', { status: 400 });
   if (targetURL.indexOf('__hzpv=') !== -1) targetURL = delQueryParam(targetURL, '__hzpv');
@@ -3836,13 +3920,6 @@ async function handleRequest(request, env, ctx, pathOverride) {
   var targetURLObject;
   try { targetURLObject = new URL(targetURL); }
   catch (e) { return new Response('Invalid URL', { status: 400 }); }
-  try {
-    var tHost = String(targetURLObject.hostname || '').toLowerCase();
-    var tPath = String(targetURLObject.pathname || '');
-    if ((tHost === 'www.crazygames.com' || tHost === 'games.crazygames.com') && tPath.indexOf('/game/') === 0) {
-      return Response.redirect(targetURLObject.href, 302);
-    }
-  } catch (e) {}
   var navDest = String(request.headers.get('sec-fetch-dest') || '').toLowerCase();
   if (navDest === 'document' || navDest === 'iframe') {
     var navHost = '';
@@ -3882,6 +3959,15 @@ async function handleRequest(request, env, ctx, pathOverride) {
     } catch (e) { refReal = null; }
     if (refReal) fwdHeaders.set('Referer', refReal);
     else fwdHeaders.delete('Referer');
+  }
+  if (!refReal) {
+    try {
+      var lockHost = String(targetURLObject.hostname || '').toLowerCase();
+      if (/(^|\.)(game-files|ssl-files|static-files|files)\.crazygames\.com$/.test(lockHost)) {
+        refReal = 'https://games.crazygames.com/';
+        fwdHeaders.set('Referer', refReal);
+      }
+    } catch (e) {}
   }
 
   try {
@@ -4011,6 +4097,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
     try { html = await resp.text(); }
     catch (e) { return new Response('Failed to read response: ' + (e.message || e), { status: 502 }); }
     html = forceFullReferrer(html);
+    try { html = html.replace(/<link\b[^>]*\brel\s*=\s*["']?manifest["']?[^>]*>/gi, ''); } catch (e) {}
 
     var realBase, realOrigin;
     try { var ru = new URL(resp.url); realBase = ru.href; realOrigin = ru.origin; }
@@ -4031,10 +4118,19 @@ async function handleRequest(request, env, ctx, pathOverride) {
       } catch (e) {}
     }
 
+    var isEngineDoc = false;
+    try { isEngineDoc = /(^|\.)game-files\.crazygames\.com$/i.test(targetURLObject.hostname); } catch (e) {}
+    try {
+      if (/(^|\.)games\.crazygames\.com$/i.test(targetURLObject.hostname)) {
+        html = html.replace(/"showAdOnExternal"\s*:\s*"[^"]*"/g, '"showAdOnExternal":"NEVER"');
+        html = html.replace(/"showAdOnInternal"\s*:\s*"[^"]*"/g, '"showAdOnInternal":"NEVER"');
+      }
+    } catch (e) {}
     html = rewriteInlineScripts(html, realBase, proxyOrigin);
     html = rewriteImportMaps(html, realBase, proxyOrigin);
     var head = '';
-    if (realBase) head += '<base href="' + escapeHtmlAttr(realBase) + '">';
+    if (realBase) head += '<base href="' + escapeHtmlAttr(isEngineDoc ? (proxyOrigin + '/' + realBase) : realBase) + '">';
+    if (isEngineDoc) head += buildEngineConfigScript(proxyOrigin);
     if (HZP.AD_BLOCK && !challengePage) head += '<style>' + heavyAdCss() + '</style>' + AD_BLOCK_CLIENT;
     head += buildClientScript(realBase, realOrigin);
     html = injectInHead(html, head);
@@ -4042,10 +4138,18 @@ async function handleRequest(request, env, ctx, pathOverride) {
     var outHeaders = new Headers(resp.headers);
     outHeaders.set('Content-Type', 'text/html; charset=utf-8');
     outHeaders.set('Access-Control-Allow-Origin', '*');
+    outHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    outHeaders.set('Pragma', 'no-cache');
     stripSecurityHeaders(outHeaders);
     outHeaders.set('Referrer-Policy', 'unsafe-url');
+    var cspPort = url.port || (url.protocol === 'https:' ? '443' : '80');
+    var cspSelf = "'self' " + url.protocol + '//localhost:' + cspPort + ' ' + url.protocol + '//127.0.0.1:' + cspPort;
+    var cspAll = cspSelf + ' data: blob:';
+    var hzpCsp = 'default-src ' + cspAll + "; script-src " + cspAll + " 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src " + cspAll + " 'unsafe-inline'; img-src " + cspAll + '; font-src ' + cspAll + '; media-src ' + cspAll + '; connect-src ' + cspSelf + ' data: blob: ws://localhost:' + cspPort + ' ws://127.0.0.1:' + cspPort + '; frame-src ' + cspAll + ' about:; worker-src ' + cspAll + '; child-src ' + cspAll + '; object-src ' + cspAll + "; base-uri *; form-action " + cspAll;
     if ((navDest === 'iframe' || navDest === 'frame') && !challengePage) {
-      outHeaders.set('Content-Security-Policy', 'sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-presentation allow-orientation-lock allow-storage-access-by-user-activation allow-top-navigation-by-user-activation; frame-ancestors * file:');
+      outHeaders.set('Content-Security-Policy', 'sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-presentation allow-orientation-lock allow-storage-access-by-user-activation allow-top-navigation-by-user-activation; frame-ancestors * file:; ' + hzpCsp);
+    } else if (!challengePage) {
+      outHeaders.set('Content-Security-Policy', hzpCsp);
     }
     if (HZP.CROSS_ORIGIN_ISOLATION) {
       outHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
@@ -4083,6 +4187,11 @@ async function handleRequest(request, env, ctx, pathOverride) {
     var passH = passThroughHeaders(resp, host, url.origin, secureCk);
     try {
       var js = await resp.text();
+      var rawJsUrl = String(resp.url || targetURL || '');
+      if (/\/Build\//.test(rawJsUrl) || /builds\.crazygames\.com\/gameframe\//i.test(rawJsUrl)) {
+        passH.set('Cache-Control', 'public, max-age=86400');
+        return new Response(js, { status: resp.status, statusText: resp.statusText, headers: passH });
+      }
       try { js = rewriteJsSource(js, new URL(resp.url).href, url.origin); }
       catch (e) { js = rewriteJsSource(js, resp.url, url.origin); }
       if (js.indexOf('__hzpLoc(') !== -1 || js.indexOf('__hzpLocObj') !== -1 || js.indexOf('__hzpPMW(') !== -1) js = withRewriteGuard(js);
@@ -4132,7 +4241,23 @@ async function handleRequest(request, env, ctx, pathOverride) {
       return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: streamH });
     } catch (e) {   }
   }
-  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers: streamH });
+  var outBody = resp.body;
+  try { if (resp.headers.get('Content-Encoding')) outBody = noLengthBody(outBody); } catch (e) {}
+  return new Response(outBody, { status: resp.status, statusText: resp.statusText, headers: streamH });
+}
+
+function noLengthBody(body) {
+  if (!body) return body;
+  var reader = body.getReader();
+  return new ReadableStream({
+    pull: function (controller) {
+      return reader.read().then(function (r) {
+        if (r.done) controller.close();
+        else controller.enqueue(r.value);
+      });
+    },
+    cancel: function (reason) { return reader.cancel(reason); }
+  });
 }
 
 function rewriteSetCookieOnHeaders(resp, h, host, secureAttr) {
@@ -4256,4 +4381,3 @@ export default {
     }
   }
 };
-
