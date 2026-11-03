@@ -4,7 +4,9 @@ var HZP = {
   CACHE_ASSETS: true,
   COOKIE_ISOLATION: true,
   CROSS_ORIGIN_ISOLATION: true,
-  CLIENT_VERSION: 40,
+  CLIENT_VERSION: 41,
+  ENGINE_HOST: '',
+  FORCE_REMOTE: false,
   UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 };
 
@@ -569,6 +571,26 @@ function verHref(href) {
     return addQueryParam(href, '__hzpv=' + String(HZP.CLIENT_VERSION));
   } catch (e) { return href; }
 }
+function isLoopbackHost(h) {
+  h = String(h || '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+}
+function engineOriginFor(proxyOrigin) {
+  try {
+    var po = new URL(proxyOrigin || 'http://127.0.0.1:8800');
+    var pn = String(po.hostname || '').toLowerCase();
+    var eh = null;
+    if (!HZP.FORCE_REMOTE && isLoopbackHost(pn)) {
+      eh = pn === 'localhost' ? '127.0.0.1' : 'localhost';
+    } else {
+      var ceh = String(HZP.ENGINE_HOST || '').toLowerCase();
+      if (!ceh || ceh === pn) return null;
+      eh = ceh;
+    }
+    return po.protocol + '//' + eh + (eh.indexOf(':') !== -1 ? '' : ':' + (po.port || (po.protocol === 'https:' ? '443' : '80')));
+  } catch (e) {}
+  return null;
+}
 function engineProxyOrigin(absUrl, proxyOrigin, realBase) {
   try {
     var u = new URL(absUrl);
@@ -579,9 +601,7 @@ function engineProxyOrigin(absUrl, proxyOrigin, realBase) {
           if (/(^|\.)game-files\.crazygames\.com$/i.test(rb.hostname)) return null;
         } catch (e) {}
       }
-      var po = new URL(proxyOrigin || 'http://127.0.0.1:8800');
-      var eh = po.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
-      return po.protocol + '//' + eh + ':' + (po.port || (po.protocol === 'https:' ? '443' : '80'));
+      return engineOriginFor(proxyOrigin);
     }
   } catch (e) {}
   return null;
@@ -984,6 +1004,8 @@ var REAL_BASE = %__HZP_REAL_BASE__%;
 var REAL_ORIGIN = %__HZP_REAL_ORIGIN__%;
 var PROXY_ORIGIN = self.__hzpOriginOverride || self.location.origin;
 var HZP_VER = '%__HZP_VER__%';
+var HZP_ENGINE_HOST = %__HZP_ENGINE_HOST__%;
+var HZP_FORCE_REMOTE = %__HZP_FORCE_REMOTE__%;
 function hzpAddQuery(href, kv) {
   var i = href.indexOf('#');
   var head = i === -1 ? href : href.slice(0, i);
@@ -1139,8 +1161,17 @@ function hzpEngineOrigin(href) {
   try {
     var u = new SN.URL(href, currentRealUrl());
     var po = new SN.URL(PROXY_ORIGIN);
-    var eh = po.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
-    var eo = po.protocol + '//' + eh + ':' + (po.port || (po.protocol === 'https:' ? '443' : '80'));
+    var eh = null;
+    var pn = String(po.hostname || '').toLowerCase();
+    var remote = HZP_FORCE_REMOTE === true || (pn !== 'localhost' && pn !== '127.0.0.1' && pn !== '[::1]');
+    if (!remote) {
+      eh = pn === 'localhost' ? '127.0.0.1' : 'localhost';
+    } else {
+      var ceh = String(HZP_ENGINE_HOST || '').toLowerCase();
+      if (!ceh || ceh === pn) return null;
+      eh = ceh;
+    }
+    var eo = po.protocol + '//' + eh + (eh.indexOf(':') !== -1 ? '' : ':' + (po.port || (po.protocol === 'https:' ? '443' : '80')));
     var isEngineDoc = false;
     try { isEngineDoc = /(^|\\.)game-files\\.crazygames\\.com$/i.test(new SN.URL(REAL_ORIGIN || REAL_BASE || '').hostname); } catch (e) {}
     if (u.origin === eo) return isEngineDoc ? null : eo;
@@ -3717,6 +3748,8 @@ function buildClientScript(realBase, realOrigin) {
   return '<script>' + HZP_CLIENT_SRC
     .replace('%__HZP_REAL_BASE__%', jsonSafeScript(realBase))
     .replace('%__HZP_REAL_ORIGIN__%', jsonSafeScript(realOrigin))
+    .replace('%__HZP_ENGINE_HOST__%', jsonSafeScript(HZP.ENGINE_HOST))
+    .replace('%__HZP_FORCE_REMOTE__%', HZP.FORCE_REMOTE ? 'true' : 'false')
     .replace('%__HZP_VER__%', String(HZP.CLIENT_VERSION).replace(/[^0-9A-Za-z._-]/g, ''))
     + '<' + '/script>';
 }
@@ -3834,6 +3867,20 @@ function buildHtmlRewriter(realBase, proxyOrigin) {
 async function handleRequest(request, env, ctx, pathOverride) {
   var url = new URL(request.url);
   var pathname = pathOverride != null ? pathOverride : url.pathname;
+
+  try {
+    if (env && typeof env === 'object') {
+      if (typeof env.HZP_ENGINE_HOST === 'string' && env.HZP_ENGINE_HOST) HZP.ENGINE_HOST = env.HZP_ENGINE_HOST;
+      ['AD_BLOCK', 'WEB_SOCKET', 'CACHE_ASSETS', 'COOKIE_ISOLATION', 'CROSS_ORIGIN_ISOLATION', 'FORCE_REMOTE'].forEach(function (k) {
+        if (typeof env['HZP_' + k] === 'string') HZP[k] = env['HZP_' + k] !== 'false';
+      });
+    }
+    if (!HZP.ENGINE_HOST && !HZP.FORCE_REMOTE && !isLoopbackHost(url.hostname)) {
+      var hn = String(url.hostname).toLowerCase();
+      if (hn.indexOf('www.') === 0) hn = hn.slice(4);
+      HZP.ENGINE_HOST = 'engine.' + hn;
+    }
+  } catch (e) {}
 
   if (url.searchParams.get('encode') === 'true') {
     var encPath = String(pathname).replace(/^\/+/, '');
@@ -4143,9 +4190,22 @@ async function handleRequest(request, env, ctx, pathOverride) {
     stripSecurityHeaders(outHeaders);
     outHeaders.set('Referrer-Policy', 'unsafe-url');
     var cspPort = url.port || (url.protocol === 'https:' ? '443' : '80');
-    var cspSelf = "'self' " + url.protocol + '//localhost:' + cspPort + ' ' + url.protocol + '//127.0.0.1:' + cspPort;
+    var cspSelf = "'self'";
+    var engineEo = engineOriginFor(url.origin);
+    if (engineEo) cspSelf += ' ' + engineEo;
+    var wsAllow = '';
+    var cspHosts = [url.hostname];
+    if (engineEo) {
+      try { cspHosts.push(new URL(engineEo).hostname); } catch (e) {}
+    }
+    cspHosts.forEach(function (h) {
+      wsAllow += ' ws://' + h + (url.port ? ':' + url.port : '') + ' wss://' + h + (url.port ? ':' + url.port : '');
+    });
+    if (!HZP.FORCE_REMOTE && isLoopbackHost(url.hostname)) {
+      wsAllow += ' ws://localhost:' + cspPort + ' ws://127.0.0.1:' + cspPort;
+    }
     var cspAll = cspSelf + ' data: blob:';
-    var hzpCsp = 'default-src ' + cspAll + "; script-src " + cspAll + " 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src " + cspAll + " 'unsafe-inline'; img-src " + cspAll + '; font-src ' + cspAll + '; media-src ' + cspAll + '; connect-src ' + cspSelf + ' data: blob: ws://localhost:' + cspPort + ' ws://127.0.0.1:' + cspPort + '; frame-src ' + cspAll + ' about:; worker-src ' + cspAll + '; child-src ' + cspAll + '; object-src ' + cspAll + "; base-uri *; form-action " + cspAll;
+    var hzpCsp = 'default-src ' + cspAll + "; script-src " + cspAll + " 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src " + cspAll + " 'unsafe-inline'; img-src " + cspAll + '; font-src ' + cspAll + '; media-src ' + cspAll + '; connect-src ' + cspSelf + ' data: blob:' + wsAllow + '; frame-src ' + cspAll + ' about:; worker-src ' + cspAll + '; child-src ' + cspAll + '; object-src ' + cspAll + "; base-uri *; form-action " + cspAll;
     if ((navDest === 'iframe' || navDest === 'frame') && !challengePage) {
       outHeaders.set('Content-Security-Policy', 'sandbox allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-presentation allow-orientation-lock allow-storage-access-by-user-activation allow-top-navigation-by-user-activation; frame-ancestors * file:; ' + hzpCsp);
     } else if (!challengePage) {
