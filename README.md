@@ -1,6 +1,6 @@
-# HyperZProxy 0.5.0-Beta
+# HyperZProxy 0.6.0-Beta
 
-A simple public proxy for bypassing work/cors restrictions on websites.
+A advanced public proxy for bypassing work/cors restrictions on websites.
 
 This is faster, and more compatible with websites than even scramjet.
 
