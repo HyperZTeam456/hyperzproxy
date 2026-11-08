@@ -4,7 +4,7 @@ var HZP = {
   CACHE_ASSETS: true,
   COOKIE_ISOLATION: true,
   CROSS_ORIGIN_ISOLATION: true,
-  CLIENT_VERSION: 42,
+  CLIENT_VERSION: 44,
   ENGINE_HOST: '',
   FORCE_REMOTE: false,
   UA: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -196,6 +196,9 @@ function refererRecovery(request) {
     var ref = request.headers.get('Referer');
     if (!ref) return null;
     var own = new URL(request.url);
+    // If the requested path already names an absolute upstream URL, it is not
+    // a relative asset reference that needs referer-based recovery.
+    if (isProxiedPath(own.pathname)) return null;
     var ru;
     try { ru = new URL(ref); } catch (e) { return null; }
     if (ru.origin !== own.origin) return null;
@@ -235,6 +238,11 @@ function isCssContentType(ct) {
   if (!ct) return false;
   var e = ct.toLowerCase().split(';')[0].trim();
   return e === 'text/css' || /\+css$/.test(e);
+}
+function isJsonBodyText(text) {
+  var t = String(text == null ? '' : text).replace(/^\uFEFF/, '').trim();
+  if (!t || (t.charAt(0) !== '{' && t.charAt(0) !== '[')) return false;
+  try { JSON.parse(t); return true; } catch (e) { return false; }
 }
 
 
@@ -345,7 +353,10 @@ function rewriteCssUrls(css, realBase, proxyOrigin) {
 
 function rewriteResponseLinkHeader(value, realBase, proxyOrigin) {
   try {
-    return String(value).replace(/<([^>]+)>/g, function (m, target) {
+    // Proxied responses are rewritten (CSS URLs, etc.), so upstream SRI hashes
+    // in preload Link headers can never match. Drop the integrity parameter.
+    var out = String(value).replace(/;\s*integrity\s*=\s*(?:"(?:\\.|[^"\\])*"|[^,;\s]*)/gi, '');
+    return out.replace(/<([^>]+)>/g, function (m, target) {
       try {
         var abs = new URL(target, realBase);
         if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return m;
@@ -818,6 +829,19 @@ function rewriteJsSource(js, realBase, proxyOrigin) {
   return out;
 }
 
+// Scratch routes project/editor screens from window.location.pathname. Behind
+// the proxy that path starts with /https://..., so make its reads use the
+// virtual upstream path (e.g. /projects/60917032/) instead.
+function rewriteScratchLocationPath(js) {
+  try {
+    if (js.indexOf('location.pathname') === -1) return js;
+    var out = js.split('window.location.pathname').join('globalThis.__hzpLoc("pathname")');
+    out = out.split('self.location.pathname').join('globalThis.__hzpLoc("pathname")');
+    out = out.split('document.location.pathname').join('globalThis.__hzpLoc("pathname")');
+    out = out.replace(/(^|[^\w$.#])location\??\.pathname(?![\w$])/g, '$1globalThis.__hzpLoc("pathname")');
+    return out;
+  } catch (e) { return js; }
+}
 function scriptNeedsRewrite(src) {
   if (src.indexOf('location') !== -1) return true;
   if (src.indexOf('postMessage') !== -1) return true;
@@ -829,13 +853,18 @@ function scriptNeedsRewrite(src) {
   );
 }
 function rewriteInlineScripts(html, realBase, proxyOrigin) {
+  var isScratch = false;
   try {
-    if (realBase && /(^|\.)game-files\.crazygames\.com/i.test(String(new URL(realBase).hostname))) return html;
+    var rh = String(new URL(realBase).hostname || '');
+    if (/(^|\.)game-files\.crazygames\.com/i.test(rh)) return html;
+    isScratch = /(^|\.)scratch\.mit\.edu$/i.test(rh);
   } catch (e) {}
   return html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi, function (match, attrs, content) {
     if (/\bsrc\s*=/i.test(attrs)) return match;
     if (!content.trim() || !scriptNeedsRewrite(content)) return match;
-    return '<script' + attrs + '>' + rewriteJsSource(content, realBase, proxyOrigin) + '</script>';
+    var rewritten = rewriteJsSource(content, realBase, proxyOrigin);
+    if (isScratch) rewritten = rewriteScratchLocationPath(rewritten);
+    return '<script' + attrs + '>' + rewritten + '</script>';
   });
 }
 
@@ -1084,20 +1113,24 @@ function unproxyInput(v) {
       var r1 = realFrom(s);
       if (r1) return r1;
     }
-    var si = s.indexOf('/proxy/');
-    if (si >= 0) {
-      var cand = s.slice(si);
-      if (cand.indexOf('/proxy/') === 0) {
-        var r2 = realFrom(PROXY_ORIGIN + cand);
-        if (r2) return r2;
+    var absolute = /^(?:[a-z][a-z0-9+.-]*:|\\/\\/)/i.test(s);
+    var sameProxy = s.indexOf(PROXY_ORIGIN) === 0;
+    if (!absolute || sameProxy) {
+      var si = s.indexOf('/proxy/');
+      if (si >= 0) {
+        var cand = s.slice(si);
+        if (cand.indexOf('/proxy/') === 0) {
+          var r2 = realFrom(PROXY_ORIGIN + cand);
+          if (r2) return r2;
+        }
       }
-    }
-    var hi = s.indexOf('/http');
-    if (hi >= 0) {
-      var cand2 = s.slice(hi);
-      if (cand2.indexOf('/http') === 0) {
-        var r3 = realFrom(PROXY_ORIGIN + cand2);
-        if (r3) return r3;
+      var hi = s.indexOf('/http');
+      if (hi >= 0) {
+        var cand2 = s.slice(hi);
+        if (cand2.indexOf('/http') === 0) {
+          var r3 = realFrom(PROXY_ORIGIN + cand2);
+          if (r3) return r3;
+        }
       }
     }
   } catch (e) {}
@@ -1108,6 +1141,9 @@ function resolveUrl(v, base) {
   catch (e) { return null; }
 }
 
+function encodeUrlSpaces(s) {
+  return String(s).replace(/ /g, '%20');
+}
 function realFrom(v) {
   try {
     if (v == null) return null;
@@ -1124,7 +1160,7 @@ function realFrom(v) {
         var ddec;
         try { ddec = decodeURIComponent(dform); } catch (e) { ddec = dform; }
         ddec = ddec.replace(/^(https?):\\/(?!\\/)/i, '$1://');
-        if (ddec.indexOf('://') !== -1) return deVerUrl(ddec + (u.search || '') + (u.hash || ''));
+        if (ddec.indexOf('://') !== -1) return deVerUrl(encodeUrlSpaces(ddec) + (u.search || '') + (u.hash || ''));
       }
       return null;
     }
@@ -1133,6 +1169,7 @@ function realFrom(v) {
     if (ws) return ws[1] + '://' + ws[2] + (ws[3] || '') + (u.search || '') + (u.hash || '');
     var decoded;
     try { decoded = decodeURIComponent(rest); } catch (e) { decoded = rest; }
+    decoded = encodeUrlSpaces(decoded);
     if (decoded.indexOf('://') !== -1) return deVerUrl(decoded + (u.search || '') + (u.hash || ''));
     var firstSlash = decoded.indexOf('/');
     if (firstSlash === -1) {
@@ -1189,8 +1226,8 @@ function toProxy(v) {
     if (/^(mailto:|tel:|sms:|about:|blob:|data:|javascript:)/i.test(s)) return s;
         if (/^https?:\\/\\//i.test(s)) {
       try {
-        var snp = new SN.URL(s).pathname;
-        if (isProxiedPath(snp)) return s;
+        var snu = new SN.URL(s);
+        if (snu.origin === PROXY_ORIGIN && isProxiedPath(snu.pathname)) return s;
       } catch (e) {}
     }
     var abs = resolveUrl(s);
@@ -3149,7 +3186,10 @@ function hookRequests() {
     return 'var RO=' + JSON.stringify(realOrigin || '') + ';' +
       'function px(v){try{var s=String(v==null?"":v);if(!s)return v;if(s.indexOf(PO)===0)return v;' +
       'if(/^(mailto:|tel:|sms:|about:|blob:|data:|javascript:)/i.test(s))return v;' +
-      'var a=new URL(s,self.location.href);' +
+      'var B=self.location.href;' +
+      'if(RO&&B.indexOf("blob:")===0)B=RO;' +
+      'else if(RO&&B.indexOf(PO+"/")===0){try{var d=decodeURIComponent(B.slice(PO.length+1));if(d.indexOf("://")!==-1)B=d;}catch(e){}}' +
+      'var a=new URL(s,B);' +
       'if(a.protocol==="http:"||a.protocol==="https:"){if(a.origin===PO)return v;return PO+"/"+a.href;}' +
       'if(a.protocol==="ws:"||a.protocol==="wss:"){var wu=PO+"/"+(a.protocol==="wss:"?"wss":"ws")+"/"+a.host+a.pathname+a.search;if(RO)wu+=(wu.indexOf("?")===-1?"?":"&")+"__hzpo="+encodeURIComponent(RO);return wu;}' +
       'return v;}catch(e){return v;}}';
@@ -3160,7 +3200,7 @@ function hookRequests() {
     var i = open;
     while (i < t.length) {
       var c = t.charAt(i);
-      if (c === '"' || c === "'" || c === '\`') {
+      if (c === '"' || c === "'" || c === String.fromCharCode(96)) {
         var q = c;
         i++;
         while (i < t.length) {
@@ -3245,6 +3285,23 @@ function hookRequests() {
       return wurl;
     } catch (e) { return realUrl; }
   }
+  function hzNeedsWorkerFetchProxy(raw) {
+    try {
+      var s = String(raw == null ? '' : raw);
+      if (!s || s.indexOf('blob:') === 0) return false;
+      var ro = new SN.URL(REAL_ORIGIN || self.location.href);
+      var host = String(ro.hostname || '').toLowerCase();
+      var needsPatch = function (h) {
+        h = String(h || '').toLowerCase();
+        return /(^|\.)scratch\.mit\.edu$/.test(h) || /(^|\.)discord(app)?\.com$/.test(h);
+      };
+      if (!needsPatch(host)) return false;
+      var abs;
+      if (/^[a-z][a-z0-9+.-]*:/i.test(s)) abs = new SN.URL(s);
+      else abs = new SN.URL(s, ro.href);
+      return needsPatch(abs.hostname);
+    } catch (e) { return false; }
+  }
 
   try {
     if (self.Worker) {
@@ -3256,7 +3313,11 @@ function hookRequests() {
               var wm0 = !!(ctx.args[1] && ctx.args[1].type === 'module');
               if (HZ_BLOB_DEC && HZ_BLOB_DEC.has(ws0)) ctx.args[0] = hzWrapBlobWorker(wm0 ? ws0 : ((HZ_BLOB_REV && HZ_BLOB_REV.get(ws0)) || ws0), wm0);
               else ctx.args[0] = hzWrapBlobWorker(ws0, wm0);
-            } else ctx.args[0] = toProxy(ws0);
+            } else {
+              var wm1 = !!(ctx.args[1] && ctx.args[1].type === 'module');
+              var wp1 = toProxy(ws0);
+              ctx.args[0] = hzNeedsWorkerFetchProxy(ws0) ? hzWrapBlobWorker(wp1, wm1) : wp1;
+            }
           }
         } catch (e) {}
       });
@@ -4044,14 +4105,30 @@ async function handleRequest(request, env, ctx, pathOverride) {
     if (hv === '' || /^"+$/.test(hv)) fwdHeaders.delete(n);
   });
   ['Host', 'cf-connecting-ip', 'cf-ray', 'cf-visitor', 'cf-worker',
-   'x-forwarded-proto', 'x-forwarded-for', 'x-forwarded-host', 'x-real-ip'].forEach(function (n) { fwdHeaders.delete(n); });
+   'x-forwarded-proto', 'x-forwarded-for', 'x-forwarded-host', 'x-real-ip',
+   'proxy-authorization', 'proxy-connection', 'connection', 'keep-alive',
+   'te', 'trailer', 'transfer-encoding', 'upgrade'].forEach(function (n) { fwdHeaders.delete(n); });
 
   var refRaw = fwdHeaders.get('Referer');
   var refReal = null;
   if (refRaw) {
     try {
       var refU = new URL(refRaw);
-      if (refU.origin === url.origin) refReal = parseUniversalURL(refU.pathname, refU.search, refU.hash);
+      // __hzpv is a proxy cache-buster, not part of the upstream page.
+      // Leaking it here makes Discord see a Referer that a native tab
+      // never produces, so strip all proxy-internal __hz* params.
+      var refSearch = refU.search;
+      try {
+        if (refSearch) {
+          var refQuery = new URLSearchParams(refSearch);
+          Array.from(refQuery.keys()).forEach(function (k) {
+            if (k.indexOf('__hz') === 0) refQuery.delete(k);
+          });
+          var refQueryStr = refQuery.toString();
+          refSearch = refQueryStr ? ('?' + refQueryStr) : '';
+        }
+      } catch (eRef) {}
+      if (refU.origin === url.origin) refReal = parseUniversalURL(refU.pathname, refSearch, refU.hash);
     } catch (e) { refReal = null; }
     if (refReal) fwdHeaders.set('Referer', refReal);
     else fwdHeaders.delete('Referer');
@@ -4077,7 +4154,13 @@ async function handleRequest(request, env, ctx, pathOverride) {
         return parts.length > 2 ? parts.slice(-2).join('.') : h;
       };
       var sfSite;
-      if (!initOrigin) sfSite = request.headers.get('sec-fetch-dest') === 'document' ? 'none' : 'cross-site';
+      if (!initOrigin) {
+        var incomingSite = String(request.headers.get('sec-fetch-site') || '').toLowerCase();
+        if (request.headers.get('sec-fetch-dest') === 'document') sfSite = 'none';
+        else if (incomingSite === 'same-origin' || incomingSite === 'same-site' ||
+                 incomingSite === 'cross-site' || incomingSite === 'none') sfSite = incomingSite;
+        else sfSite = 'cross-site';
+      }
       else if (initOrigin === tgtOrigin) sfSite = 'same-origin';
       else if (siteKey(initOrigin) === siteKey(tgtOrigin)) sfSite = 'same-site';
       else sfSite = 'cross-site';
@@ -4139,9 +4222,30 @@ async function handleRequest(request, env, ctx, pathOverride) {
     }
   }
   var resp;
-  try { resp = await fetch(targetURL, fetchOpts); }
-  catch (err) { return new Response('Failed to fetch: ' + (err.message || err), { status: 502 }); }
-
+  try {
+    resp = await fetch(targetURL, fetchOpts);
+  }
+  catch (err) {
+    var fetchCode = err && err.cause && err.cause.code;
+    // Node's undici has a 16 KB response-header limit by default. Some
+    // sites (notably YouTube's iframe API) send larger header sets for
+    // Chromium builds. Retry with a conservative UA/client-hint set.
+    if (fetchCode === 'UND_ERR_HEADERS_OVERFLOW') {
+      try {
+        fwdHeaders.set('User-Agent', HZP.UA);
+        fwdHeaders.set('Accept-Encoding', 'gzip, deflate, br');
+        ['sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
+         'sec-ch-ua-full-version-list', 'sec-ch-ua-arch', 'sec-ch-ua-bitness',
+         'sec-ch-ua-model', 'sec-ch-ua-wow64', 'sec-ch-ua-form-factors',
+         'sec-ch-ua-platform-version'].forEach(function (n) { fwdHeaders.delete(n); });
+        resp = await fetch(targetURL, fetchOpts);
+      } catch (err2) {
+        return new Response('Failed to fetch: ' + (err2.message || err2), { status: 502 });
+      }
+    } else {
+      return new Response('Failed to fetch: ' + (err.message || err), { status: 502 });
+    }
+  }
   if (resp.status >= 300 && resp.status < 400) {
     var redirH = passThroughHeaders(resp, host, url.origin, secureCk);
     return new Response(null, { status: resp.status, statusText: resp.statusText, headers: redirH });
@@ -4192,6 +4296,15 @@ async function handleRequest(request, env, ctx, pathOverride) {
     var html;
     try { html = await resp.text(); }
     catch (e) { return new Response('Failed to read response: ' + (e.message || e), { status: 502 }); }
+    if (isJsonBodyText(html)) {
+      var jsonH = passThroughHeaders(resp, host, url.origin, secureCk);
+      jsonH.set('Content-Type', 'application/json; charset=utf-8');
+      jsonH.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      jsonH.delete('Content-Length');
+      jsonH.delete('Content-Encoding');
+      jsonH.delete('Transfer-Encoding');
+      return new Response(html, { status: resp.status, statusText: resp.statusText, headers: jsonH });
+    }
     html = forceFullReferrer(html);
     try { html = html.replace(/<link\b[^>]*\brel\s*=\s*["']?manifest["']?[^>]*>/gi, ''); } catch (e) {}
 
@@ -4284,6 +4397,9 @@ async function handleRequest(request, env, ctx, pathOverride) {
       }
       try { js = rewriteJsSource(js, new URL(resp.url).href, url.origin); }
       catch (e) { js = rewriteJsSource(js, resp.url, url.origin); }
+      try {
+        if (/(^|\.)scratch\.mit\.edu$/i.test(String(targetURLObject.hostname || ''))) js = rewriteScratchLocationPath(js);
+      } catch (e) {}
       if (js.indexOf('__hzpLoc(') !== -1 || js.indexOf('__hzpLocObj') !== -1 || js.indexOf('__hzpPMW(') !== -1) js = withRewriteGuard(js);
       passH.set('Cache-Control', 'public, max-age=86400');
       return new Response(js, { status: resp.status, statusText: resp.statusText, headers: passH });
@@ -4458,7 +4574,7 @@ export default {
   async fetch(request, env, ctx) {
     try {
       var res = await handleRequest(request, env, ctx);
-      if (res && res.status === 502) {
+      if (res && (res.status === 502 || res.status === 404)) {
         var rec = refererRecovery(request);
         if (rec) return rec;
       }
