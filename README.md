@@ -1,4 +1,4 @@
-# HyperZProxy 0.6.0-Beta
+# HyperZProxy 0.6.1-Beta
 
 A advanced public proxy for bypassing work/cors restrictions on websites.
 
