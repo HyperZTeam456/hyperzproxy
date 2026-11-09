@@ -3854,7 +3854,7 @@ function buildEngineConfigScript(proxyOrigin) {
   return '<script>(function(){var EO=' + eo + ';' +
     'function rw(o){if(!o||typeof o!=="object")return;for(var k in o){try{var v=o[k];' +
     'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)){var h="";try{h=new URL(v).hostname}catch(e){}' +
-    'if(/(^|\\.)(game-files|ssl-files|static-files|files)\\.crazygames\\.com$/i.test(h))o[k]=EO+"/"+v;' +
+    'if(/(^|\\.)(game-files|ssl-files|static-files|files)\\.crazygames\\.com$/i.test(h))o[k]=(typeof globalThis.__hzpProxyUrlFor==="function"?globalThis.__hzpProxyUrlFor(v,EO):EO+"/"+v);' +
     '}}catch(e){}}}' +
     'window.addEventListener("message",function(e){var d=e.data;if(!d||d.type!=="unity2020config")return;rw(d.loaderOptions);rw(d.unityConfig);},true);' +
     '})();<' + '/script>';
@@ -4167,12 +4167,14 @@ async function handleRequest(request, env, ctx, pathOverride) {
       fwdHeaders.set('sec-fetch-site', sfSite);
     }
   } catch (e) {}
+  var refOriginReal = null;
+  try { if (refReal) refOriginReal = new URL(refReal).origin; } catch (eRefOrigin) {}
   var originRaw = fwdHeaders.get('Origin');
   if (originRaw) {
     var originReal = null;
     try {
       if (originRaw === url.origin) {
-        if (refReal) originReal = new URL(refReal).origin;
+        if (refOriginReal) originReal = refOriginReal;
       } else {
         var oU = new URL(originRaw);
         if (oU.origin === url.origin) {
@@ -4185,6 +4187,15 @@ async function handleRequest(request, env, ctx, pathOverride) {
     } catch (e) { originReal = null; }
     if (originReal) fwdHeaders.set('Origin', originReal);
     else fwdHeaders.delete('Origin');
+  } else if (refOriginReal && refOriginReal !== targetURLObject.origin) {
+    // The browser treats the proxy URL as same-origin, so it omits Origin for
+    // fetch/XHR calls that are cross-origin in the real page. Restore the real
+    // initiating origin; APIs such as Puter's Wisp discovery require it.
+    var originDest = String(request.headers.get('sec-fetch-dest') || '').toLowerCase();
+    var originMode = String(request.headers.get('sec-fetch-mode') || '').toLowerCase();
+    if (originDest === '' || originDest === 'empty' || originMode === 'cors' || originMode === 'same-origin') {
+      fwdHeaders.set('Origin', refOriginReal);
+    }
   }
 
   var host = targetURLObject.hostname;
