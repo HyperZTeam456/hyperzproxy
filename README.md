@@ -1,4 +1,4 @@
-# HyperZProxy 0.6.1-Beta
+# HyperZProxy 0.6.2-Beta
 
 A advanced public proxy for bypassing work/cors restrictions on websites.
 
@@ -6,7 +6,9 @@ This is faster, and more compatible with websites than even scramjet.
 
 Please don't abuse this service unless you want to meet **Dr. Consequences...** 🥀 Excessive abuse may cause the proxy to become rate limited or significantly slower for everyone.
 
-Format is: hyperzproxy.z04.workers.dev/urlhere
+**Supported Formats** 
+
+hyperzproxy.z04.workers.dev/urlhere?encode=true/false and hyperzproxy.z04.workers.dev?urlhere&encode=true/false
 
 You're welcome to fork this repository, but please keep the credits in the README.
 
