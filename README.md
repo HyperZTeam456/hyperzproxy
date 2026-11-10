@@ -8,7 +8,7 @@ Please don't abuse this service unless you want to meet **Dr. Consequences...** 
 
 **Supported Formats** 
 
-hyperzproxy.z04.workers.dev/urlhere?encode=true/false and hyperzproxy.z04.workers.dev?urlhere&encode=true/false
+hyperzproxy.z04.workers.dev/urlhere?encode=true/false and hyperzproxy.z04.workers.dev?urlhere&encode=true/false (you don't have to put the encode markers)
 
 You're welcome to fork this repository, but please keep the credits in the README.
 
