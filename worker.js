@@ -12,6 +12,43 @@ var HZP = {
 
 var HIDDEN_ATTR = 'hz-attr-';
 
+
+var HZP_SERVICE_WORKER_SRC = `'use strict';
+
+
+var selfUrl = new URL(self.location.href);
+var pagePath = selfUrl.searchParams.get('page') || '';
+
+self.addEventListener('install', function () {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', function (event) {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('fetch', function (event) {
+  if (event.request.mode !== 'navigate') return;
+  var url;
+  try { url = new URL(event.request.url); } catch (e) { return; }
+  if (url.origin !== self.location.origin) return;
+  if (pagePath && url.pathname !== pagePath) return;
+
+  event.respondWith(fetch(event.request).then(function (response) {
+    var headers = new Headers(response.headers);
+    headers.set('Cross-Origin-Opener-Policy', 'same-origin');
+    headers.set('Cross-Origin-Embedder-Policy', 'credentialless');
+    // fetch() exposes the decoded body; do not let the browser decode it again.
+    headers.delete('Content-Length');
+    headers.delete('Content-Encoding');
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: headers
+    });
+  }));
+});`;
+
 var CLOUDMOON_ORIGIN = (function () {
   var _p = ['sr' + 'iail', 'wor' + 'kers', 'd' + 'ev', 'goog' + 'le-cla' + 'ssroom'];
   return 'https://' + _p[3] + '.' + _p[0] + '.' + _p[1] + '.' + _p[2] + '/';
@@ -152,12 +189,85 @@ function hzVigDecodePath(p) {
     } catch (eD) { return bin; }
   } catch (e) { return null; }
 }
+function hzVigEncodePath(input) {
+  var text = String(input == null ? '' : input);
+  var bytes = [];
+  try { bytes = Array.from(new TextEncoder().encode(text)); }
+  catch (e) {
+    var utf = unescape(encodeURIComponent(text));
+    for (var i = 0; i < utf.length; i++) bytes.push(utf.charCodeAt(i));
+  }
+  var bin = '';
+  for (var b = 0; b < bytes.length; b++) bin += String.fromCharCode(bytes[b]);
+  var s = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return hzVigShift(s, HZ_VIG_KEY, true);
+}
 
 
+function queryProxyTargetValue(target) {
+  // Keep the target readable in the query string, but protect the ampersands
+  // and fragments that would otherwise be mistaken for proxy parameters.
+  return encodeURI(String(target)).replace(/&/g, '%26').replace(/#/g, '%23');
+}
+function makeProxyUrl(target, encoded, origin) {
+  var base = String(origin == null ? '' : origin).replace(/\/+$/, '');
+  if (!base) return String(target);
+  var payload;
+  if (encoded) {
+    payload = hzVigEncodePath(target);
+  } else {
+    payload = queryProxyTargetValue(target);
+  }
+  return base + '/?' + payload + '&encode=' + (encoded ? 'true' : 'false');
+}
+function parseProxyQuery(search) {
+  var raw = String(search == null ? '' : search);
+  if (raw.charAt(0) === '?') raw = raw.slice(1);
+  if (!raw) return null;
+
+  var encoded = false;
+  var extras = '';
+  var targetRaw = raw;
+  var flagRe = /(?:^|&)encode=(true|false)(?:&|$)/ig;
+  var flag = null;
+  var m;
+  while ((m = flagRe.exec(raw))) flag = m;
+  if (flag) {
+    encoded = String(flag[1]).toLowerCase() === 'true';
+    targetRaw = raw.slice(0, flag.index);
+    extras = raw.slice(flag.index + flag[0].length);
+  }
+
+  var prefixed = /^(?:url|u|target)=([\s\S]*)$/i.exec(targetRaw);
+  if (prefixed) targetRaw = prefixed[1];
+  if (!targetRaw) return null;
+
+  var decoded = targetRaw;
+  try { decoded = decodeURIComponent(targetRaw); } catch (e) {}
+  if (encoded) {
+    decoded = hzVigDecodePath(decoded);
+    if (!decoded) return null;
+  }
+
+  decoded = String(decoded || '').replace(/^\s+|\s+$/g, '');
+  if (!decoded) return null;
+  if (/^\/\//.test(decoded)) decoded = 'https:' + decoded;
+  if (!/^(?:https?|wss?):\/\//i.test(decoded)) {
+    if (/^[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}(?:[/:?#]|$)/i.test(decoded)) {
+      decoded = 'https://' + decoded;
+    } else {
+      return null;
+    }
+  }
+  return { target: decoded, encoded: encoded, extras: extras };
+}
 function parseUniversalURL(pathname, search, hash) {
   search = search || ''; hash = hash || '';
   var targetPath = pathname && pathname.charAt(0) === '/' ? pathname.slice(1) : (pathname || '');
-  if (!targetPath) return null;
+  if (!targetPath) {
+    var queryTarget = parseProxyQuery(search);
+    return queryTarget ? queryTarget.target + hash : null;
+  }
 
   if (targetPath.indexOf('proxy/') === 0) {
     var rest = targetPath.substring(6);
@@ -189,6 +299,15 @@ function isProxiedPath(p) {
   p = String(p == null ? '' : p);
   return p.indexOf('/proxy/') === 0 || p.indexOf('/http://') === 0 || p.indexOf('/https://') === 0 || p.indexOf('/ws/') === 0 || p.indexOf('/wss/') === 0;
 }
+function isProxiedUrl(value, proxyOrigin) {
+  try {
+    var u = new URL(String(value), proxyOrigin || 'http://proxy.invalid');
+    if (isProxiedPath(u.pathname)) return true;
+    if (!proxyOrigin || u.origin !== proxyOrigin) return false;
+    if ((u.pathname === '/' || u.pathname === '') && parseProxyQuery(u.search)) return true;
+  } catch (e) {}
+  return false;
+}
 function refererRecovery(request) {
   try {
     var m = request.method;
@@ -198,14 +317,15 @@ function refererRecovery(request) {
     var own = new URL(request.url);
     // If the requested path already names an absolute upstream URL, it is not
     // a relative asset reference that needs referer-based recovery.
-    if (isProxiedPath(own.pathname)) return null;
+    if (isProxiedUrl(own.href, own.origin)) return null;
     var ru;
     try { ru = new URL(ref); } catch (e) { return null; }
     if (ru.origin !== own.origin) return null;
     var refPath = ru.pathname || '';
     var refDecoded = refPath;
     try { refDecoded = decodeURIComponent(refPath); } catch (e) {}
-    if (refDecoded.indexOf('://') === -1) return null;
+    var refQueryTarget = parseProxyQuery(ru.search);
+    if (refDecoded.indexOf('://') === -1 && !refQueryTarget) return null;
     var realRef = parseUniversalURL(refPath, ru.search, '');
     if (!realRef) return null;
     if (!/^https?:\/\//i.test(realRef)) return null;
@@ -216,7 +336,7 @@ function refererRecovery(request) {
     return new Response(null, {
       status: 302,
       headers: {
-        'Location': own.origin + '/' + target.href,
+        'Location': makeProxyUrl(target.href, false, own.origin),
         'Cache-Control': 'no-store'
       }
     });
@@ -327,8 +447,8 @@ function cssProxyUrl(url, realBase, proxyOrigin) {
     var p = abs.protocol;
     if (p === 'data:' || p === 'blob:' || p === 'javascript:' || p === 'about:' || p === 'mailto:') return url;
     if (p !== 'http:' && p !== 'https:') return url;
-    if (isProxiedPath(abs.pathname)) return url;
-    return proxyOrigin + '/' + abs.href;
+    if (isProxiedUrl(abs.href, proxyOrigin)) return url;
+    return makeProxyUrl(abs.href, false, proxyOrigin);
   } catch (e) { return url; }
 }
 function rewriteCssUrls(css, realBase, proxyOrigin) {
@@ -360,8 +480,8 @@ function rewriteResponseLinkHeader(value, realBase, proxyOrigin) {
       try {
         var abs = new URL(target, realBase);
         if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return m;
-        if (isProxiedPath(abs.pathname)) return m;
-        return '<' + proxyOrigin + '/' + abs.href + '>';
+        if (isProxiedUrl(abs.href, proxyOrigin)) return m;
+        return '<' + makeProxyUrl(abs.href, false, proxyOrigin) + '>';
       } catch (e) { return m; }
     });
   } catch (e) { return value; }
@@ -373,8 +493,8 @@ function rewriteResponseUrlHeaders(headers, realUrl, proxyOrigin) {
     try {
       var abs = new URL(v, realUrl || undefined);
       if (abs.protocol !== 'http:' && abs.protocol !== 'https:') { headers.delete(name); return; }
-      if (isProxiedPath(abs.pathname)) { headers.delete(name); return; }
-      headers.set(name, proxyOrigin + '/' + abs.href);
+      if (isProxiedUrl(abs.href, proxyOrigin)) { headers.delete(name); return; }
+      headers.set(name, makeProxyUrl(abs.href, false, proxyOrigin));
     } catch (e) { headers.delete(name); }
   });
   var link = headers.get('link');
@@ -624,14 +744,16 @@ function jsProxyUrl(url, quote, realBase, proxyOrigin) {
     var abs = u.indexOf('//') === 0 ? new URL('https:' + u) : new URL(u, realBase);
     if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return quote + u + quote;
     var eo = engineProxyOrigin(abs.href, proxyOrigin, realBase);
-    return quote + (eo || proxyOrigin) + '/' + verHref(abs.href) + quote;
+    var versioned = verHref(abs.href);
+    var jsUrl = makeProxyUrl(abs.href, false, eo || proxyOrigin);
+    if (versioned !== abs.href) jsUrl = addQueryParam(jsUrl, '__hzpv=' + HZP.CLIENT_VERSION);
+    return quote + jsUrl + quote;
   } catch (e) { return quote + url + quote; }
 }
 function jsWsProxyUrl(url, quote, proxyOrigin, realBase) {
   try {
     var abs = new URL(url);
-    var p = abs.protocol === 'wss:' || abs.protocol === 'https:' ? 'wss' : 'ws';
-    var href = proxyOrigin + '/' + p + '/' + abs.host + abs.pathname + abs.search;
+    var href = makeProxyUrl(abs.href, false, proxyOrigin);
     try {
       var ro = new URL(realBase).origin;
       if (ro) href = addQueryParam(href, '__hzpo=' + encodeURIComponent(ro));
@@ -775,11 +897,12 @@ function hzFindMatchingParen(js, open) {
 
 function hzImportHelpersSrc(rb, po) {
   return 'var __hzpMeta={url:' + JSON.stringify(rb) + ',resolve:function(s){try{return new globalThis.URL(s,__hzpMeta.url).href;}catch(e){return s;}}};' +
+    'function __hzpq(u){return ' + JSON.stringify(po) + '+"/?"+encodeURI(String(u)).replace(/&/g,"%26").replace(/#/g,"%23")+"&encode=false";}' +
     'function __hzpi(base,u,opts){try{var s=globalThis.String(u==null?"":u);' +
     'if(s&&/^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|\\/|\\.{1,2}\\/)/.test(s)){' +
     'var a=new globalThis.URL(s,base||undefined);' +
     'if((a.protocol==="http:"||a.protocol==="https:")&&a.origin!==' + JSON.stringify(po) + '){' +
-    'return import(' + JSON.stringify(po) + '+"/"+a.href,opts);}}}catch(e){}return import(u,opts);}';
+    'return import(__hzpq(a.href),opts);}}}catch(e){}return import(u,opts);}';
 }
 function prependJsHelpers(js, rb, po) {
   var at = 0, pos = 0;
@@ -881,8 +1004,8 @@ function rewriteImportMaps(html, realBase, proxyOrigin) {
       if (!map || typeof map !== 'object') return;
       Object.keys(map).forEach(function (k) {
         var v = map[k];
-        if (typeof v === 'string' && /^https?:\/\//i.test(v) && v.indexOf(po + '/') !== 0) {
-          map[k] = po + '/' + v;
+        if (typeof v === 'string' && /^https?:\/\//i.test(v) && !isProxiedUrl(v, po)) {
+          map[k] = makeProxyUrl(v, false, po);
           changed = true;
         } else if (v && typeof v === 'object') {
           rewriteMap(v);
@@ -943,7 +1066,7 @@ function rewriteMetaRefresh(content, realBase, proxyOrigin) {
   var abs;
   try { abs = new URL(parsed.url, realBase); } catch (e) { return null; }
   if (abs.protocol !== 'http:' && abs.protocol !== 'https:') return null;
-  var proxied = proxyOrigin + '/' + abs.href;
+  var proxied = makeProxyUrl(abs.href, false, proxyOrigin);
   return parsed.time + '; URL=' + proxied;
 }
 
@@ -1075,6 +1198,72 @@ function deVerUrl(sv) {
   } catch (e) {}
   return sv;
 }
+var HZP_VIG_KEY = 'HyperZHubKey1600';
+var HZP_VIG_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+function hzpVigShift(s, key, dir) {
+  var A = HZP_VIG_ALPHABET, AL = A.length, out = '', i, ai, ki;
+  for (i = 0; i < s.length; i++) {
+    ai = A.indexOf(s.charAt(i));
+    if (ai < 0) { out += s.charAt(i); continue; }
+    ki = A.indexOf(key.charAt(i % key.length));
+    out += dir ? A[(ai + ki) % AL] : A[(ai - ki + AL) % AL];
+  }
+  return out;
+}
+function hzpVigDecode(value) {
+  var s = hzpVigShift(String(value || ''), HZP_VIG_KEY, false);
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  try {
+    var bin = atob(s);
+    try {
+      var u8 = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      return new TextDecoder('utf-8', { fatal: false }).decode(u8);
+    } catch (eD) { return bin; }
+  } catch (e) { return null; }
+}
+function hzpParseProxyQuery(search) {
+  var raw = String(search == null ? '' : search);
+  if (raw.charAt(0) === '?') raw = raw.slice(1);
+  if (!raw) return null;
+  var encoded = false, extras = '', targetRaw = raw;
+  var flagRe = /(?:^|&)encode=(true|false)(?:&|$)/ig;
+  var flag = null, m;
+  while ((m = flagRe.exec(raw))) flag = m;
+  if (flag) {
+    encoded = String(flag[1]).toLowerCase() === 'true';
+    targetRaw = raw.slice(0, flag.index);
+    extras = raw.slice(flag.index + flag[0].length);
+  }
+  var pm = /^(?:url|u|target)=([\\s\\S]*)$/i.exec(targetRaw);
+  if (pm) targetRaw = pm[1];
+  if (!targetRaw) return null;
+  var decoded = targetRaw;
+  try { decoded = decodeURIComponent(targetRaw); } catch (e) {}
+  if (encoded) decoded = hzpVigDecode(decoded);
+  if (!decoded) return null;
+  decoded = String(decoded).replace(/^\\s+|\\s+$/g, '');
+  if (/^\\/\\//.test(decoded)) decoded = 'https:' + decoded;
+  if (!/^(?:https?|wss?):\\/\\//i.test(decoded)) {
+    if (/^[a-z0-9][a-z0-9.\\-]*\\.[a-z]{2,}(?:[/:?#]|$)/i.test(decoded)) decoded = 'https://' + decoded;
+    else return null;
+  }
+  return { target: decoded, encoded: encoded, extras: extras };
+}
+function hzpProxyUrl(target, origin) {
+  var base = String(origin || PROXY_ORIGIN).replace(/\\/+$/, '');
+  return base + '/?' + encodeURI(String(target)).replace(/&/g, '%26').replace(/#/g, '%23') + '&encode=false';
+}
+function hzpIsProxiedUrl(value) {
+  try {
+    var u = new SN.URL(String(value), PROXY_ORIGIN);
+    if (u.origin !== PROXY_ORIGIN) return false;
+    if (isProxiedPath(u.pathname)) return true;
+    if ((u.pathname === '/' || u.pathname === '') && hzpParseProxyQuery(u.search)) return true;
+  } catch (e) {}
+  return false;
+}
 
 var SN = {};
 (function(){
@@ -1152,6 +1341,11 @@ function realFrom(v) {
     try { u = new SN.URL(s, PROXY_ORIGIN); } catch (e) { return null; }
     if (u.origin !== PROXY_ORIGIN) return null;
     var p = u.pathname;
+    if (p === '/' || p === '') {
+      var pq = hzpParseProxyQuery(u.search);
+      if (pq) return deVerUrl(encodeUrlSpaces(pq.target)) + (u.hash || '');
+      return null;
+    }
     if (p.indexOf('/proxy/') !== 0) {
       var dws = /^\\/(wss?)\\/([a-z0-9.\\-\\[\\]:]+)(\\/.*)?$/.exec(p);
       if (dws) return dws[1] + '://' + dws[2] + (dws[3] || '') + (u.search || '') + (u.hash || '');
@@ -1227,7 +1421,7 @@ function toProxy(v) {
         if (/^https?:\\/\\//i.test(s)) {
       try {
         var snu = new SN.URL(s);
-        if (snu.origin === PROXY_ORIGIN && isProxiedPath(snu.pathname)) return s;
+        if (snu.origin === PROXY_ORIGIN && hzpIsProxiedUrl(snu.href)) return s;
       } catch (e) {}
     }
     var abs = resolveUrl(s);
@@ -1237,21 +1431,29 @@ function toProxy(v) {
     if (p !== 'http:' && p !== 'https:' && p !== 'ws:' && p !== 'wss:') return s;
     if (abs.origin === PROXY_ORIGIN) return abs.href;
     var eo = hzpEngineOrigin(abs.href);
-    if (eo) return abs.origin === eo ? abs.href : (eo + '/' + verUrl(abs.href));
+    var versioned = verUrl(abs.href);
+    if (eo) {
+      if (abs.origin === eo) return abs.href;
+      var engineUrl = hzpProxyUrl(abs.href, eo);
+      if (versioned !== abs.href) engineUrl = hzpAddQuery(engineUrl, '__hzpv=' + HZP_VER);
+      return engineUrl;
+    }
     if (p === 'ws:' || p === 'wss:') {
-      var wsHost = abs.host;
+      var wsTarget = abs.href;
       try {
         if (REAL_ORIGIN) {
           var ro = new SN.URL(REAL_ORIGIN);
           var po = new SN.URL(PROXY_ORIGIN);
-          if (abs.host === po.host) wsHost = ro.host;
+          if (abs.host === po.host) wsTarget = abs.protocol + '//' + ro.host + abs.pathname + abs.search;
         }
       } catch (e) {}
-      var wsProxied = PROXY_ORIGIN + '/' + (p === 'wss:' ? 'wss' : 'ws') + '/' + wsHost + abs.pathname + abs.search;
+      var wsProxied = hzpProxyUrl(wsTarget);
       if (REAL_ORIGIN) wsProxied = hzpAddQuery(wsProxied, '__hzpo=' + encodeURIComponent(REAL_ORIGIN));
       return wsProxied;
     }
-        return PROXY_ORIGIN + '/' + verUrl(abs.href);
+        var proxyUrl = hzpProxyUrl(abs.href);
+        if (versioned !== abs.href) proxyUrl = hzpAddQuery(proxyUrl, '__hzpv=' + HZP_VER);
+        return proxyUrl;
   } catch (e) { return v; }
 }
 
@@ -1345,9 +1547,12 @@ function cssProxyUrl(u) {
     var p = abs.protocol;
     if (p === 'data:' || p === 'blob:' || p === 'javascript:' || p === 'about:' || p === 'mailto:') return s;
     if (p !== 'http:' && p !== 'https:') return s;
-    if (abs.origin === PROXY_ORIGIN && isProxiedPath(abs.pathname)) return s;
+    if (abs.origin === PROXY_ORIGIN && hzpIsProxiedUrl(abs.href)) return s;
         if (abs.origin === PROXY_ORIGIN) return abs.href;
-    return PROXY_ORIGIN + '/' + verUrl(abs.href);
+    var versioned = verUrl(abs.href);
+    var proxyUrl = hzpProxyUrl(abs.href);
+    if (versioned !== abs.href) proxyUrl = hzpAddQuery(proxyUrl, '__hzpv=' + HZP_VER);
+    return proxyUrl;
   } catch (e) { return s; }
 }
 function rewriteCssStr(css) {
@@ -3184,14 +3389,15 @@ function hookRequests() {
 
   function hzPxSrc(realOrigin) {
     return 'var RO=' + JSON.stringify(realOrigin || '') + ';' +
+      'function q(u){return PO+"/?"+encodeURI(String(u)).replace(/&/g,"%26").replace(/#/g,"%23")+"&encode=false";}' +
       'function px(v){try{var s=String(v==null?"":v);if(!s)return v;if(s.indexOf(PO)===0)return v;' +
       'if(/^(mailto:|tel:|sms:|about:|blob:|data:|javascript:)/i.test(s))return v;' +
       'var B=self.location.href;' +
       'if(RO&&B.indexOf("blob:")===0)B=RO;' +
-      'else if(RO&&B.indexOf(PO+"/")===0){try{var d=decodeURIComponent(B.slice(PO.length+1));if(d.indexOf("://")!==-1)B=d;}catch(e){}}' +
+      'else if(B.indexOf(PO)===0){try{var qs=B.indexOf("?"),qraw=qs>=0?B.slice(qs+1):"";var qf=/(?:^|&)encode=(?:true|false)(?:&|$)/i.exec(qraw);var qp=qraw;if(qf)qp=qraw.slice(0,qf.index);var qm=/^(?:url|u|target)=/i.exec(qp);if(qm)qp=qp.slice(qm[0].length);qp=decodeURIComponent(qp);if(qp.indexOf("://")!==-1){B=qp;}else if(B.indexOf(PO+"/")===0){var d=decodeURIComponent(B.slice(PO.length+1));if(d.indexOf("://")!==-1)B=d;}}catch(e){}}' +
       'var a=new URL(s,B);' +
-      'if(a.protocol==="http:"||a.protocol==="https:"){if(a.origin===PO)return v;return PO+"/"+a.href;}' +
-      'if(a.protocol==="ws:"||a.protocol==="wss:"){var wu=PO+"/"+(a.protocol==="wss:"?"wss":"ws")+"/"+a.host+a.pathname+a.search;if(RO)wu+=(wu.indexOf("?")===-1?"?":"&")+"__hzpo="+encodeURIComponent(RO);return wu;}' +
+      'if(a.protocol==="http:"||a.protocol==="https:"){if(a.origin===PO)return v;return q(a.href);}' +
+      'if(a.protocol==="ws:"||a.protocol==="wss:"){var wu=q(a.href);if(RO)wu+="&__hzpo="+encodeURIComponent(RO);return wu;}' +
       'return v;}catch(e){return v;}}';
   }
 
@@ -3854,7 +4060,7 @@ function buildEngineConfigScript(proxyOrigin) {
   return '<script>(function(){var EO=' + eo + ';' +
     'function rw(o){if(!o||typeof o!=="object")return;for(var k in o){try{var v=o[k];' +
     'if(typeof v==="string"&&/^https?:\\/\\//i.test(v)){var h="";try{h=new URL(v).hostname}catch(e){}' +
-    'if(/(^|\\.)(game-files|ssl-files|static-files|files)\\.crazygames\\.com$/i.test(h))o[k]=(typeof globalThis.__hzpProxyUrlFor==="function"?globalThis.__hzpProxyUrlFor(v,EO):EO+"/"+v);' +
+    'if(/(^|\\.)(game-files|ssl-files|static-files|files)\\.crazygames\\.com$/i.test(h))o[k]=(typeof globalThis.__hzpProxyUrlFor==="function"?globalThis.__hzpProxyUrlFor(v,EO):EO+"/?"+encodeURI(String(v)).replace(/&/g,"%26").replace(/#/g,"%23")+"&encode=false");' +
     '}}catch(e){}}}' +
     'window.addEventListener("message",function(e){var d=e.data;if(!d||d.type!=="unity2020config")return;rw(d.loaderOptions);rw(d.unityConfig);},true);' +
     '})();<' + '/script>';
@@ -3882,17 +4088,18 @@ function attrProxyUrl(v, realBase, proxyOrigin) {
     if (v.charAt(0) === '#' || v.charAt(0) === '?') return v;
         if (/^https?:\/\//i.test(v)) {
       try {
-        var ap = new URL(v).pathname;
-        if (isProxiedPath(ap)) return v;
+        if (isProxiedUrl(v, proxyOrigin)) return v;
       } catch (e) {}
     }
     var abs = new URL(v, realBase);
     var p = abs.protocol;
     if (p !== 'http:' && p !== 'https:') return v;
-    if (isProxiedPath(abs.pathname)) return v;
+    if (isProxiedUrl(abs.href, proxyOrigin)) return v;
     var eo = engineProxyOrigin(abs.href, proxyOrigin, realBase);
-    if (eo) return eo + '/' + verHref(abs.href);
-    return proxyOrigin + '/' + verHref(abs.href);
+    var versioned = verHref(abs.href);
+    var attrUrl = makeProxyUrl(abs.href, false, eo || proxyOrigin);
+    if (versioned !== abs.href) attrUrl = addQueryParam(attrUrl, '__hzpv=' + HZP.CLIENT_VERSION);
+    return attrUrl;
   } catch (e) { return v; }
 }
 function srcSetProxy(value, realBase, proxyOrigin) {
@@ -3992,7 +4199,41 @@ async function handleRequest(request, env, ctx, pathOverride) {
     }
   } catch (e) {}
 
-  if (url.searchParams.get('encode') === 'true') {
+  // Built-in HyperZWeb service worker. When this worker is routed on the same
+  // origin as HyperZWeb, the page can register /HyperZWeb-sw.js without a
+  // second file next to the HTML. /__hz_sw.js is a root-scope alias.
+  if (request.method === 'GET' && (pathname === '/HyperZWeb-sw.js' || pathname === '/__hz_sw.js')) {
+    return new Response(HZP_SERVICE_WORKER_SRC, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Cache-Control': 'no-store, no-cache, must-revalidate',
+        'Service-Worker-Allowed': '/',
+        'Access-Control-Allow-Origin': '*',
+        'X-Content-Type-Options': 'nosniff'
+      }
+    });
+  }
+
+  var proxyQuery = null;
+  var proxyQueryExtras = '';
+  if (pathOverride == null && (pathname === '/' || pathname === '') && url.search) {
+    proxyQuery = parseProxyQuery(url.search);
+    if (proxyQuery) {
+      if (proxyQuery.encoded) {
+        var pqHost = '';
+        try { pqHost = new URL(proxyQuery.target).hostname; } catch (eQH) { pqHost = ''; }
+        if (pqHost && (/^\d{1,3}(\.\d{1,3}){3}$/.test(pqHost) || pqHost.charAt(0) === '[')) {
+          return new Response('Invalid URL', { status: 400 });
+        }
+      }
+      proxyQueryExtras = proxyQuery.extras || '';
+      pathname = '/' + proxyQuery.target;
+      url.search = '';
+    }
+  }
+
+  if (!proxyQuery && url.searchParams.get('encode') === 'true') {
     var encPath = String(pathname).replace(/^\/+/, '');
     if (encPath) {
       var decTarget = hzVigDecodePath(encPath);
@@ -4056,7 +4297,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
     var upgrade = (request.headers.get('upgrade') || '').toLowerCase();
   if (upgrade === 'websocket' && request.method === 'GET' && HZP.WEB_SOCKET) {
     var wsOriginHint = '';
-    try { wsOriginHint = url.searchParams.get('__hzpo') || ''; } catch (e) {}
+    try { wsOriginHint = new URLSearchParams(proxyQueryExtras).get('__hzpo') || url.searchParams.get('__hzpo') || ''; } catch (e) {}
     var wsTarget = parseUniversalURL(pathname, url.search);
     if (wsTarget) wsTarget = delQueryParam(wsTarget, '__hzpo');
     wsTarget = wsTarget ? wsTarget.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:') : null;
@@ -4066,14 +4307,19 @@ async function handleRequest(request, env, ctx, pathOverride) {
   }
 
   if (url.hostname === 'localhost' && String(request.headers.get('sec-fetch-dest') || '').toLowerCase() === 'document') {
-    return Response.redirect(url.protocol + '//127.0.0.1:' + (url.port || (url.protocol === 'https:' ? '443' : '80')) + url.pathname + url.search, 302);
+    var localOrigin = url.protocol + '//127.0.0.1:' + (url.port || (url.protocol === 'https:' ? '443' : '80'));
+    var localTarget = proxyQuery
+      ? makeProxyUrl(proxyQuery.target, proxyQuery.encoded, localOrigin)
+      : localOrigin + url.pathname + url.search;
+    if (proxyQuery && proxyQuery.extras) localTarget = addQueryParam(localTarget, proxyQuery.extras);
+    return Response.redirect(localTarget, 302);
   }
 
   var targetURL = parseUniversalURL(pathname, url.search, url.hash);
   if (!targetURL) return new Response('Invalid URL', { status: 400 });
   if (targetURL.indexOf('__hzpv=') !== -1) targetURL = delQueryParam(targetURL, '__hzpv');
   var wrappedFix = normalizeWrappedUrl(targetURL);
-  if (wrappedFix) return Response.redirect(new URL('/' + wrappedFix, url.origin).href, 302);
+  if (wrappedFix) return Response.redirect(makeProxyUrl(wrappedFix, false, url.origin), 302);
   var targetURLObject;
   try { targetURLObject = new URL(targetURL); }
   catch (e) { return new Response('Invalid URL', { status: 400 }); }
@@ -4117,18 +4363,23 @@ async function handleRequest(request, env, ctx, pathOverride) {
       // __hzpv is a proxy cache-buster, not part of the upstream page.
       // Leaking it here makes Discord see a Referer that a native tab
       // never produces, so strip all proxy-internal __hz* params.
-      var refSearch = refU.search;
-      try {
-        if (refSearch) {
-          var refQuery = new URLSearchParams(refSearch);
-          Array.from(refQuery.keys()).forEach(function (k) {
-            if (k.indexOf('__hz') === 0) refQuery.delete(k);
-          });
-          var refQueryStr = refQuery.toString();
-          refSearch = refQueryStr ? ('?' + refQueryStr) : '';
-        }
-      } catch (eRef) {}
-      if (refU.origin === url.origin) refReal = parseUniversalURL(refU.pathname, refSearch, refU.hash);
+      var refQueryInfo = (refU.pathname === '/' || refU.pathname === '') ? parseProxyQuery(refU.search) : null;
+      if (refQueryInfo) {
+        if (refU.origin === url.origin) refReal = parseUniversalURL(refU.pathname, refU.search, refU.hash);
+      } else {
+        var refSearch = refU.search;
+        try {
+          if (refSearch) {
+            var refQuery = new URLSearchParams(refSearch);
+            Array.from(refQuery.keys()).forEach(function (k) {
+              if (k.indexOf('__hz') === 0) refQuery.delete(k);
+            });
+            var refQueryStr = refQuery.toString();
+            refSearch = refQueryStr ? ('?' + refQueryStr) : '';
+          }
+        } catch (eRef) {}
+        if (refU.origin === url.origin) refReal = parseUniversalURL(refU.pathname, refSearch, refU.hash);
+      }
     } catch (e) { refReal = null; }
     if (refReal) fwdHeaders.set('Referer', refReal);
     else fwdHeaders.delete('Referer');
@@ -4349,7 +4600,7 @@ async function handleRequest(request, env, ctx, pathOverride) {
     html = rewriteInlineScripts(html, realBase, proxyOrigin);
     html = rewriteImportMaps(html, realBase, proxyOrigin);
     var head = '';
-    if (realBase) head += '<base href="' + escapeHtmlAttr(isEngineDoc ? (proxyOrigin + '/' + realBase) : realBase) + '">';
+    if (realBase) head += '<base href="' + escapeHtmlAttr(isEngineDoc ? makeProxyUrl(realBase, false, proxyOrigin) : realBase) + '">';
     if (isEngineDoc) head += buildEngineConfigScript(proxyOrigin);
     if (HZP.AD_BLOCK && !challengePage) head += '<style>' + heavyAdCss() + '</style>' + AD_BLOCK_CLIENT;
     if (!challengePage) head += buildClientScript(realBase, realOrigin);
